@@ -698,3 +698,13 @@ OF-61  lcd_final  mem_logging_no_card  any
 # the trim (v2.05: the edit is refused and REL switches REL on); nothing is saved, so the EEPROM assertion still holds.
 IMP-27  lcd        setup_bat_not_editable  build == production and step in 8..10
 IMP-27  lcd_final  setup_bat_not_editable  build == production
+
+# TMP-IMP-01 (mres/diode.s, production only): the DIODE chirp is one double beep per confirmed contact instead of a report of
+# every >1000-count jump against the last chirped reference.  v2.05 chirps twice per contact and twice per disconnect
+# (the 1 s lockout 0x200080B4 lets the settled value chirp again) and once at the mode entry with open leads; the port
+# chirps once per contact and is silent at overload and on the way back to open.  In diode_values the buzzer therefore
+# sounds on the 0.6 V and 1.8 V contacts only (the 2.9 V and 5.0 V steps keep the LATCHED contact; 5.0 V is overload on
+# the 3 V range) instead of at every step, and in diode_range it stays silent (open leads, no contact).  Only the
+# buzzer pin differs; the display and the value chain are unchanged.
+TMP-IMP-01  gpio  diode_values  build == production and pin == buzzer
+TMP-IMP-01  gpio  diode_range   build == production and pin == buzzer

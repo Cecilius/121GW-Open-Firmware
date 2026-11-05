@@ -234,6 +234,16 @@ The card update (HOLD + MEM at power-on, SETUP) keeps working with the two-part 
 Tip: `bH100` makes even the shortest touch audible (good for scratching along a trace); `bHOFF` shows intermittent
 contacts as broken beeps.
 
+## Diode beep: one double beep per contact
+
+In the diode function the meter beeps **once per contact**: a double beep about 0.1..0.3 s after the probes touch,
+when the reading has arrived. While the probes stay connected nothing more sounds - the value may settle or drift
+(a warmed junction shows a slowly falling voltage) without further beeps. Lifting the probes is silent too: open
+leads (OL) and a reverse-biased diode never beep, and a brief lose-contact bounce does not beep again on the same
+connection. The continuous tone of shorted probes is unchanged; the buzzer setting (page 3) silences the diode
+beeps as before. (The original beeped on every change of more than 1000 counts - typically twice when the probes
+contacted and twice when they lifted.)
+
 ## Statistics (MIN/MAX)
 
 - **Where:** press **MIN/MAX** as usual; the small display now shows `n` and the number of readings collected (from 10000
