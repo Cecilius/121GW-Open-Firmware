@@ -11,6 +11,8 @@
 @ v2.05 (index 0..18); queued command echoes (ble_tx_queue_put) go out between frames, never inside one.
 @ While HSE is the system clock (SD card access) nothing is sent and received bytes are dropped, because
 @ the USART baud rate divider was computed for MSI (NF-04).
+@ The receive interrupt also clears an overrun that arrives with RXNE = 0 (OF-71) and feeds the extended link diagnosis
+@ counters (ble/xdiag.s, IMP-44).
 @ Context: main and USART2 interrupt as stated per routine.
 @ =============================================================================
 
@@ -69,7 +71,7 @@ ble_txq_tail:       .space 1            @ queue read index (USART2 handler)
 @ ble_sysclk_is_hse - is HSE the system clock?
 @ Replaces : nothing in v2.05 (new, NF-04)
 @ In       : -
-@ Out      : r0 = 1 if RCC_CFGR.SWS = HSE (SD card access, sys_clock_select(1)), else 0
+@ Out      : r0 = 1 if RCC_CFGR.SWS is not MSI (SD card access, sys_clock_select(1): PLL, or HSE as v2.05), else 0
 @ Clobbers : r0, flags
 @ Context  : ISR-safe
 @ Spec     : RM0038 6.3.3 RCC_CFGR SWS; DESIGN.md 6.26 NF-04
@@ -78,10 +80,10 @@ FUNC ble_sysclk_is_hse
     ldr r0, =RCC_CFGR                       @ clock configuration register
     ldr r0, [r0]
     ands r0, r0, #RCC_CFGR_SWS_MASK         @ SWS bits 3:2 = clock in use
-    cmp r0, #BLE_SWS_HSE                    @ 10b = HSE
-    ite eq
-    moveq r0, #1                            @ HSE in use
-    movne r0, #0                            @ MSI, HSI or PLL
+    cmp r0, #0                              @ 00b = MSI: the baud rate was computed for it (IMP-41: a card session
+    ite ne                                  @ runs on the PLL, v2.05 on HSE: both are "not MSI")
+    movne r0, #1                            @ a card-session clock
+    moveq r0, #0                            @ MSI
     bx lr
 ENDFUNC ble_sysclk_is_hse
     .ltorg
@@ -196,7 +198,7 @@ FUNC ble_tx_start_frame
     ldr r1, =ble_start_pending
     strb r0, [r1]                           @ frame start requested
     push {lr}
-    bl ble_tx_kick                          @ begin now unless busy or on HSE
+    bl ble_tx_kick                          @ begin now unless busy or on the card-session clock
     pop {pc}
 .Lsf_ret:
     bx lr
@@ -211,7 +213,9 @@ ENDFUNC ble_tx_start_frame
 @ Out      : r0 = 0 queued, 1 refused (link down, or the queue lacks room: nothing is queued)
 @ Clobbers : r0-r3, r12, flags (r4-r6 saved)
 @ Context  : main only
-@ RAM      : writes ble_txq, ble_txq_head; reads ble_txq_tail, ble_usart_on
+@ RAM      : writes ble_txq, ble_txq_head; reads ble_txq_tail, ble_usart_on; xd_tx_q_full (xd_inc, IMP-44)
+@ Note     : a refusal for lack of room is counted in xd_tx_q_full while the extended diagnosis is on; the refusal because
+@            the link is down is not (nothing could ever have been sent).
 @ -----------------------------------------------------------------------------
 FUNC ble_tx_queue_put
     push {r4-r6, lr}
@@ -227,7 +231,7 @@ FUNC ble_tx_queue_put
     subs r3, r3, #1
     ands r3, r3, #(BLE_TXQ_LEN - 1)         @ free bytes = (tail - head - 1) mod size
     cmp r1, r3
-    bhi .Lqp_refuse                         @ not enough room: queue nothing
+    bhi .Lqp_full                           @ not enough room: queue nothing
     ldr r5, =ble_txq
 .Lqp_loop:
     cbz r1, .Lqp_done                       @ all bytes copied
@@ -242,6 +246,9 @@ FUNC ble_tx_queue_put
     bl ble_tx_kick                          @ start the TXE interrupt if idle
     movs r0, #0
     pop {r4-r6, pc}
+.Lqp_full:
+    ldr r0, =xd_tx_q_full
+    bl xd_inc                               @ IMP-44: the queue lacked room (counted while the diagnosis is on)
 .Lqp_refuse:
     movs r0, #1
     pop {r4-r6, pc}
@@ -372,19 +379,27 @@ ENDFUNC ble_tx_pump
 @ Replaces : 0x080247D8 IRQ38_Handler (v2.05)
 @ In       : -
 @ Out      : -
-@ Clobbers : r0-r3, r12, flags (hardware stacking; r4, r5 saved)
+@ Clobbers : r0-r3, r12, flags (hardware stacking; r4-r6 saved)
 @ Context  : USART2 interrupt, priority 0
-@ RAM      : reads ble_usart_on; writes ble_rx_buf, ble_rx_idx, ble_rx_expect, ble_rx_len, ble_rx_ready
-@ Spec     : analysis/ble_packet.md 6 (receive side); DESIGN.md 6.26
+@ RAM      : reads ble_usart_on; writes ble_rx_buf, ble_rx_idx, ble_rx_expect, ble_rx_len, ble_rx_ready; the extended
+@            diagnosis counters (xd_*, ble/xdiag.s)
+@ Spec     : analysis/ble_packet.md 6 (receive side); DESIGN.md 6.26; RM0038 27.3.3 (overrun error), 27.6.1 (SR.ORE)
 @ Deviation: OF-10 (TXE branch moved to ble_tx_pump), NF-04 (bytes received while HSE is the system clock are
-@            discarded and the parser is reset)
+@            discarded and the parser is reset), OF-71 (an overrun flag with RXNE = 0 is cleared, below), IMP-44 (counters)
 @ Note     : TXE branch: v2.05 0x080247DA..0x08024810 (GetITStatus 0x727).  RXNE branch: 0x08024820..0x080248AE
 @            (GetITStatus 0x525).  Parser: byte stored at buf[idx], idx wraps at 20; with idx = 1 the first byte
 @            selects the expected length (0xF4: 5, 0xF8: 15, else resynchronise); a frame is complete when
 @            idx >= expected.
+@            OF-71: v2.05 asks USART_GetITStatus(0x525) (0x0801CC7C), which is true only when SR.RXNE and CR1.RXNEIE are
+@            both set, and returns without a DR read otherwise.  RM0038 27.3.3: the RXNEIE interrupt is also generated by
+@            ORE, and "if RXNE=0 ... the new data is received during the reading sequence (between the USART_SR register
+@            read access and the USART_DR read access)": ORE is then set with RXNE = 0 and only SR read then DR read
+@            clears it.  Without that DR read the interrupt fires again at once for ever (the main loop starves).  Here
+@            r6 holds the SR value read for the sequence; with RXNE = 0, ORE = 1 and RXNEIE = 1 the DR is read once and
+@            the (lost) byte is dropped, counted as an overrun.
 @ -----------------------------------------------------------------------------
 FUNC ble_usart2_isr
-    push {r4, r5, lr}
+    push {r4, r5, r6, lr}
     ldr r4, =USART2_BASE
     ldrh r0, [r4, #USART_SR]
     ldrh r1, [r4, #USART_CR1]
@@ -394,21 +409,38 @@ FUNC ble_usart2_isr
     beq .Lisr_rx                            @ TXE interrupt not enabled
     bl ble_tx_pump                          @ send the next byte or stop
 .Lisr_rx:
-    ldrh r0, [r4, #USART_SR]
-    tst r0, #USART_SR_RXNE
-    beq .Lisr_done                          @ no received byte
+    ldrh r6, [r4, #USART_SR]                @ r6 = SR: the first half of the "read SR, then read DR" clearing sequence
     ldrh r1, [r4, #USART_CR1]
+    tst r6, #USART_SR_RXNE
+    bne .Lisr_byte                          @ a received byte is waiting
+    tst r6, #USART_SR_ORE
+    beq .Lisr_done                          @ neither a received byte nor an overrun
+    tst r1, #USART_CR1_RXNEIE
+    beq .Lisr_done                          @ RXNE interrupt not enabled: the overrun raises no interrupt (RM0038 27.3.3)
+    @ OF-71: ORE with RXNE = 0 (the byte that overran was lost, nothing is left to read).  The SR read above and this DR
+    @ read are the sequence that clears ORE (RM0038 27.6.1); without them the interrupt line stays active.
+    ldrh r0, [r4, #USART_DR]                @ value not used: the byte is dropped
+    mov r0, r6
+    movs r1, #0                             @ no received byte, only the overrun is counted
+    bl xd_rx_account
+    b .Lisr_done
+.Lisr_byte:
     tst r1, #USART_CR1_RXNEIE
     beq .Lisr_done                          @ RXNE interrupt not enabled
     ldrh r5, [r4, #USART_DR]                @ received byte (the read clears RXNE; v2.05 0x08024830)
     uxtb r5, r5                             @ the buffer holds bytes (v2.05 stores the low byte)
     movw r0, #0xFFDF                        @ complement of the RXNE bit (bit 5): rc_w0 clear of RXNE only
     strh r0, [r4, #USART_SR]                @ v2.05 0x08024842 clears the RXNE flag again (USART_ClearITPendingBit)
+    mov r0, r6                              @ IMP-44: count the byte and the error flags of its SR value
+    movs r1, #1
+    bl xd_rx_account
     ldr r0, =ble_usart_on
     ldrb r0, [r0]
     cbz r0, .Lisr_done                      @ link down: drop the byte
     bl ble_sysclk_is_hse
     cbz r0, .Lrx_store
+    ldr r0, =xd_rx_dropped_hse
+    bl xd_inc                               @ IMP-44: the byte is discarded (counted while the diagnosis is on)
     ldr r1, =ble_rx_idx
     movs r0, #0
     strb r0, [r1]                           @ NF-04: HSE in use, discard the byte and restart the frame
@@ -468,7 +500,7 @@ FUNC ble_usart2_isr
     movs r0, #0
     strb r0, [r2]                           @ next frame starts at index 0
 .Lisr_done:
-    pop {r4, r5, pc}
+    pop {r4, r5, r6, pc}
 ENDFUNC ble_usart2_isr
     .ltorg
 
@@ -671,16 +703,23 @@ FUNC fn_0801CAEC
     adds r0, #0x32                          @ 0801CBA4  r0 = ((r7 - 100 (0x64) * (((r7 / 100 (0x64)) << 4) >> 4)) << 3) + 50 (0x32)
     movs r1, #0x64                          @ 0801CBA6
     udiv r0, r0, r1                         @ 0801CBA8  r0 = (((r7 - 100 (0x64) * (((r7 / 100 (0x64)) << 4) >> 4)) << 3) + 50 (0x32)) / 100 (0x64)
-    ands r0, r0, #0x7                       @ 0801CBAC  r0 = ((((r7 - 100 (0x64) * (((r7 / 100 (0x64)) << 4) >> 4)) << 3) + 50 (0x32)) / 100 (0x64)) & 7
-    orrs r9, r0, r9                         @ 0801CBB0  r9 = (((((r7 - 100 (0x64) * (((r7 / 100 (0x64)) << 4) >> 4)) << 3) + 50 (0x32)) / 100 (0x64)) & 7) | ((r7 / 100 (0x64)) << 4)
+    @ OF-72: v2.05 masks the rounded fraction with & 7 (0x0801CBAC) and loses the carry when it rounds up to 8:
+    @ BRR is then one mantissa step (16) too low.  The fraction 8 is a carry into the mantissa (BRR bit 3 stays 0
+    @ with OVER8, RM0038 27.6.3).
+    cmp r0, #8
+    it eq
+    moveq r0, #0x10                         @ fraction 8 = mantissa + 1, fraction 0
+    add r9, r9, r0
     b .L0801CBCA                            @ 0801CBB4
 .L0801CBB6:  @ reached from 0801CB9E bpl (bit 15 of r0 is clear)
     lsls r0, r8, #0x4                       @ 0801CBB6  r0 = r8 << 4
     adds r0, #0x32                          @ 0801CBBA  r0 = (r8 << 4) + 50 (0x32)
     movs r1, #0x64                          @ 0801CBBC
     udiv r0, r0, r1                         @ 0801CBBE  r0 = ((r8 << 4) + 50 (0x32)) / 100 (0x64)
-    ands r0, r0, #0xf                       @ 0801CBC2  r0 = (((r8 << 4) + 50 (0x32)) / 100 (0x64)) & 15 (0xF)
-    orrs r9, r0, r9                         @ 0801CBC6  r9 = ((((r8 << 4) + 50 (0x32)) / 100 (0x64)) & 15 (0xF)) | r9
+    @ OF-72: v2.05 masks the rounded fraction with & 15 (0x0801CBC2) and loses the carry when it rounds up to 16
+    @ (PCLK1 4.2916 .. 4.3008 MHz at 19200): BRR 16 too low, the baud 7 % too high.  Adding it carries into the
+    @ mantissa (fraction 0 .. 16, mantissa in bits 15:4).
+    add r9, r9, r0
 .L0801CBCA:  @ reached from 0801CBB4 b
     strh r9, [r4, #0x8]                     @ 0801CBCA  [r4+8] = r9
     add sp, #0x14                           @ 0801CBCE

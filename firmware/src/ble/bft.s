@@ -27,9 +27,14 @@
 @     type 0x02 DATA   seq = packet number from 0, payload = the next bytes of the file
 @     type 0x03 END    all bytes sent: flush, check, copy, check the copy
 @     type 0x04 ABORT  back to waiting
-@     type 0x05 STATUS payload index(1): a diagnosis value in the answer's "next" field (bft_diag_tab)
-@     types 0x10 .. 0x14 SD card file requests (LIST, READ, CHUNK, DELETE, INFO; ble/bftsd.s, IMP-36) and 0x16 / 0x17
-@     settings (GET, PUT; ble/bftset.s, IMP-37), answered with the type 0x82 answer described in ble/bftsd.s
+@     type 0x05 STATUS payload index(1): a diagnosis value in the answer's "next" field (bft_diag_tab: index 0 .. 55; 40 .. 48
+@                      are the extended link diagnosis counters and the battery voltage, ble/xdiag.s, IMP-44; 49 .. 55
+@                      the clock measurement, sys/msical.s, IMP-46)
+@     types 0x10 .. 0x15 SD card requests (LIST, READ, CHUNK, DELETE, INFO, FORMAT; ble/bftsd.s, IMP-36, IMP-39) and
+@     0x16 / 0x17 settings (GET, PUT; ble/bftset.s, IMP-37), answered with the type 0x82 answer described in ble/bftsd.s
+@     type 0x19 LEAVE    leave the page Ld as a SETUP press does (next page Fr or rEL), answered with status 0 first (IMP-47)
+@     type 0x18 UPDMODE  restart into the two-part bootloader's update mode (blcmd_update_mode, IMP-42); no answer (the
+@                      meter restarts), status 3 without the two-part bootloader
 @ Answer: B5 5B 81 seq(2) 03 status next(2) crc16(2), seq = the packet answered, next = the packet number expected
 @     (with status 0x11 instead: the failed step << 8 | its FatFs result, step 1 open, 2 seek, 3 write, 4 short write,
 @     5 close; with status 0 to END: the number of failed card sessions that were repeated successfully).
@@ -147,12 +152,36 @@ bft_reset_due:  .space 1                    @ 1: restart once the link has been 
 @ 11 SDIO_STA high half, 12 reads taken on the hardware counters, 13 / 14 low / high half of the card status of the last
 @ CMD13 answer before the failure, 15 10 ms ticks of the failed status polling, 16 failed card start-ups since power-on,
 @ 17 the sd_init error code of the last one, 18 SCR reads since power-on, 19 / 20 of these the reads whose polling loop had
-@ read no word / one word when the block end was seen (IMP-34) (sd/diskio.s, sd_dg_*)
+@ read no word / one word when the block end was seen (IMP-34), 21 the write wait that last ran out (1 DMA / transfer end,
+@ 2 the card's busy; values 7 .. 11 then hold the transfer state at that moment), 22 its length in 10 ms ticks, 23 the last
+@ ACMD22 answer (0x8000 | SD error << 8 | count, 0 none yet), 24 blocks ACMD22 confirmed, 25 blocks written again (IMP-40),
+@ and of the first write timeout of the power-on: 26 / 27 the sector (low / high half), 28 / 29 the DMA source address,
+@ 30 DMA2 channel 4 CCR, 31 / 32 its CMAR, 33 SDIO_DCTRL, 34 SDIO_DLEN, 35 SDIO_FIFOCNT, 36 / 37 SDIO_STA, 38 which attempt,
+@ 39 SDIO_CLKCR
+@ (21, 22 and 7 .. 11 are of that first timeout as well) (sd/diskio.s, sd_dg_*).  Extended link diagnosis (IMP-44,
+@ ble/xdiag.s; the counters count only after the key code 0x93, and keep their values after 0x94): 40 bytes received on USART2,
+@ 41 overruns (SR.ORE), 42 noise flags (SR.NE), 43 framing errors (SR.FE), 44 bytes discarded while SYSCLK was not MSI (NF-04),
+@ 45 key / set-clock frames rejected, 46 packets answered with status 1 (CRC wrong), 47 answers / echoes not queued for lack of
+@ room, 48 battery voltage (0.01 V, read at the moment of the request).  Clock measurement (IMP-46, sys/msical.s; written at
+@ power-on and at every STOP wake): 49 / 50 MSI Hz measured with the trim as found (low / high half), 51 / 52 MSI Hz in use,
+@ 53 MSITRIM | status << 8 (CK_ST_*, macros.inc), 54 measurements made, 55 USART2_BRR
 bft_diag_tab:   .word bft_fails, bft_diag, sd_dg_count, sd_dg_op, sd_dg_sta, sd_dg_terr, sd_dg_wait
                 .word sd_dg_flags, sd_dg_dmaisr, sd_dg_cndtr, sd_dg_dcount, sd_dg_stahi, sd_dg_recov
                 .word sd_dg_r1, sd_dg_r1 + 2, sd_dg_ticks, sd_dg_icount, sd_dg_ierr, sd_dg_scrs, sd_dg_scr0, sd_dg_scr1
-bft_diag_wid:   .byte 2, 2, 2, 2, 2, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2
-    .equ BFT_DIAG_N, 21
+                .word sd_dg_wphase, sd_dg_wticks, sd_dg_a22, sd_dg_late, sd_dg_retry
+                .word sd_dg_wsec, sd_dg_wsec + 2, sd_dg_wbuf, sd_dg_wbuf + 2, sd_dg_wccr, sd_dg_wcmar, sd_dg_wcmar + 2
+                .word sd_dg_wdctrl, sd_dg_wdlen, sd_dg_wfifo, sd_dg_wsta, sd_dg_wsta + 2, sd_dg_wtry, sd_dg_wclkcr
+                .word xd_rx_bytes, xd_err_ore, xd_err_ne, xd_err_fe, xd_rx_dropped_hse, xd_bad_frames, xd_bft_crc_bad
+                .word xd_tx_q_full, pwr_bat_cv
+                .word ck_hz0, ck_hz0 + 2, ck_hz, ck_hz + 2, ck_trim, ck_steps, USART2_BASE + USART_BRR
+bft_diag_wid:   .byte 2, 2, 2, 2, 2, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2
+                .byte 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 2
+                .byte 2, 2, 2, 2, 2, 2, 2, 2, 2             @ 40 .. 48: nine u16 (IMP-44)
+                .byte 2, 2, 2, 2, 2, 2, 2                   @ 49 .. 55: the clock measurement (IMP-46)
+    .equ BFT_DIAG_N, 56
+    .equ BFT_T_UPDMODE, 0x18                @ request: restart into the two-part bootloader's update mode (as key code
+                                            @ 0x91, which the page Ld does not take: it owns the link)
+    .equ BFT_T_LEAVE,   0x19                @ request: leave the page Ld as a SETUP press does (IMP-47)
 bft_name_tmp:   .asciz "0:BTLOAD.TMP"
 bft_name_img:   .asciz "0:EEVBlog.bin"
 
@@ -309,14 +338,14 @@ LFUNC bft_answer
 ENDFUNC bft_answer
 
 @ -----------------------------------------------------------------------------
-@ bft_card_begin / bft_card_end - the card session frame of log_session_once: SYSCLK = HSE, card up, mount ...
+@ bft_card_begin / bft_card_end - the card session frame of log_session_once: card-session clock (PLL 32 MHz, IMP-41), card up, mount ...
 @ power the SDIO block off, run clock again
 @ Clobbers : r0-r3, r12, flags
 @ -----------------------------------------------------------------------------
 FUNC bft_card_begin
     push {r4, lr}
     movs r0, #1
-    bl sys_clock_select                     @ HSE for the card
+    bl sys_clock_select                     @ the card-session clock (PLL 32 MHz, IMP-41)
     movs r0, #10
     bl sd_bringup_retry
     ldr r1, =bft_fatfs
@@ -1032,10 +1061,27 @@ LFUNC bft_packet
     cmp r0, #0x10
     blo 1f
     cmp r0, #0x17
-    bhi 1f
+    bhi 2f
     bl bfx_request                          @ 0x10 .. 0x17: SD card files and settings, answered with type 0x82
     pop {r4-r7, pc}                         @ (ble/bftsd.s, ble/bftset.s; r0 = type)
-1:  movs r0, #3                             @ unknown type: not allowed
+2:  cmp r0, #BFT_T_UPDMODE
+    bne 5f
+    bl blcmd_update_mode                    @ restart into the bootloader's update mode; returns only with EEVblog's
+    b 1f
+5:  cmp r0, #BFT_T_LEAVE
+    bne 1f
+    @ IMP-47: leave the page Ld from the companion (keys do not reach the meter while the page owns the link): what a
+    @ SETUP short press on the page does (key/short.s .Lsh_setup_next without the beep): the next page (fn_08015410: Fr
+    @ with the two-part bootloader, else rEL) and a redraw of the setup page.  The answer (status 0) is queued first; bft_poll gives the link back on its next
+    @ pass, the queued answer still goes out, then the status frames resume.
+    movs r0, #0
+    bl bft_answer
+    bl fn_08015410
+    movs r0, #1
+    ldr r1, =bft_redraw
+    strb r0, [r1]
+    pop {r4-r7, pc}
+1:  movs r0, #3                             @ unknown type (or 0x18 without the two-part bootloader): not allowed
     b .Lpk_answer
 .Lpk_start:
     ldrb r0, [r4, #5]                       @ payload 8 bytes (firmware) or 9 (+ kind)
@@ -1398,6 +1444,8 @@ FUNC bft_poll
     orr r1, r1, r2, lsl #8
     cmp r0, r1
     beq 7f
+    ldr r0, =xd_bft_crc_bad
+    bl xd_inc                               @ IMP-44: counted while the extended link diagnosis is on
     movs r0, #1                             @ CRC wrong: resend
     bl bft_answer
     b .Lpo_ret

@@ -21,7 +21,9 @@ import zlib
 from collections import namedtuple
 
 T_START, T_DATA, T_END, T_ABORT, T_STATUS, T_ANSWER = 1, 2, 3, 4, 5, 0x81
-T_LIST, T_READ, T_CHUNK, T_DELETE, T_INFO, T_GET, T_PUT, T_ANSWER2 = 0x10, 0x11, 0x12, 0x13, 0x14, 0x16, 0x17, 0x82
+T_LIST, T_READ, T_CHUNK, T_DELETE, T_INFO, T_FORMAT, T_GET, T_PUT, T_ANSWER2 = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x82
+T_UPDMODE, T_LEAVE = 0x18, 0x19                     # restart into update mode; leave the page Ld (firmware F-1.17, IMP-47)
+FORMAT_WORD = b'FORMAT'      # the only payload FORMAT accepts (ble/bftsd.s)
 DIAG_NAMES = ['failed card sessions of the transfer', 'last card failure (step << 8 | FatFs result)',
               'failed disk_read / disk_write since power-on', 'their op | reason << 8', 'SDIO_STA', 'sd_transfer_error',
               'sd_wait_write result']
@@ -73,7 +75,7 @@ def status_packet(index):
 
 
 def explain_diag(values):
-    """Readable text for the STATUS values 0..20 (ble/bft.s bft_diag_tab)."""
+    """Readable text for the STATUS values 0..25 (ble/bft.s bft_diag_tab; firmware before F-1.10 has 0..20)."""
     op, reason = values[3] & 0xFF, values[3] >> 8
     why = {(1, 1): 'read: card did not return to the transfer state', (1, 2): 'read: SDIO error flag',
            (1, 3): 'read: data end / DMA end not seen in time', (2, 1): 'write: card did not return to the transfer state',
@@ -107,6 +109,13 @@ def explain_diag(values):
     if len(values) >= 21:
         text += ('; %d SCR reads since power-on, %d of them with no word and %d with one word read before the block end'
                  % (values[18], values[19], values[20]))
+    if len(values) >= 26:
+        phase = {0: 'none', 1: 'wait 1 (DMA / transfer end)', 2: "wait 2 (the card's busy)"}.get(values[21], values[21])
+        a22 = values[23]
+        ans = 'none' if not a22 & 0x8000 else 'SD error %d, %d block(s) written' % (a22 >> 8 & 0x7F, a22 & 0xFF)
+        text += ('; last write wait that ran out: %s after %d ticks of 10 ms (the end-wait values above are from that moment);'
+                 ' last ACMD22 answer: %s; %d late block(s) confirmed, %d block(s) written again'
+                 % (phase, values[22], ans, values[24], values[25]))
     return text
 
 
@@ -133,6 +142,12 @@ def delete_packet(seq, name):
 
 def info_packet(seq):
     return packet(T_INFO, seq)
+
+
+def format_packet(seq, word=FORMAT_WORD):
+    """FORMAT (0x15): the meter formats its card as exFAT; refused (0x22) unless the payload is exactly FORMAT_WORD,
+    and (0x25) without the two-part bootloader.  Everything on the card is gone."""
+    return packet(T_FORMAT, seq, word)
 
 
 def get_packet(seq):

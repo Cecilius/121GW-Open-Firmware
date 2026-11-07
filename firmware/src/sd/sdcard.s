@@ -28,9 +28,11 @@
     .section .text.sd, "ax", %progbits
 
 @ names of the v2.05 variables used in this file (addresses unchanged, DESIGN.md 5.1)
+    .equ SD_CLKDIV_FULL,          1                     @ ClockDiv of the data transfers: SDIO_CK = SDIOCLK / (ClockDiv + 2)
+                                                        @ (v2.05: 1, 8 MHz from SDIOCLK 24 MHz; IMP-41: 16 MHz from 48 MHz)
     .equ SD_WRITE_TICKS,          60                    @ IMP-33: write wait 600 ms (10 ms ticks): above the SD write timeout of
                                                                 @ 250 ms (SDSC/SDHC) / 500 ms (SDXC), Physical Layer 4.6.2.2
-    .equ SD_WRITE_POLLS,          100000                @ backstop when the tick counter does not run (about 0.8 s at 4 MHz)
+    .equ SD_WRITE_POLLS,          800000                @ backstop when the tick counter does not run (about 0.8 s at 32 MHz, IMP-41)
     .equ sd_card_info,            v_20007698            @ 0x20007698 card information record (0x58 bytes, filled by sd_get_card_info): CSD fields from +0, CID fields from +0x2C, capacity (u64) +0x48, block size +0x50, RCA (u16) +0x54, card type +0x56
     .equ sdio_init_struct,        v_20007B50            @ 0x20007B50 SDIO host configuration being built (6 words: ClockEdge, ClockBypass, ClockPowerSave, BusWide, HardwareFlowControl, ClockDiv in the byte at +0x14)
     .equ sdio_data_struct,        v_20007B68            @ 0x20007B68 data path configuration (DataTimeOut, DataLength, DataBlockSize, TransferDir, TransferMode, DPSM)
@@ -83,7 +85,7 @@ FUNC sd_init
     b       .Lsd_init_2688                  @ 08022612 goto 0x8022688
     @ full speed: the SDIO_InitTypeDef is built at 0x20007B50 and written by sdio_init (CLKCR = 0x0101)
 .Lsd_init_2614:                         @ v2.05 0x08022614, reached from 0x0802260C
-    movs    r0, #1                          @ 08022614 r0 = 1
+    movs    r0, #SD_CLKDIV_FULL             @ 08022614 v2.05: 1 (SDIO_CK = SDIOCLK / 3)
     ldr.w   r1, =sdio_init_struct           @ 08022616 r1 = &sdio_init_struct
     strb    r0, [r1, #0x14]                 @ 0802261A u8 [sdio_init_struct+0x14] = r0
     movs    r0, #0                          @ 0802261C r0 = 0
@@ -771,10 +773,12 @@ FUNC sd_get_card_info
     lsrs    r2, r2, #8                      @ 08022CB6 r2 = r2 >> 8
     movs    r4, r2                          @ 08022CB8 r4 = r2
     ldr     r2, [r1, #0x10]                 @ 08022CBA r2 = u32 [r1+0x10]
-    adds    r2, r2, #1                      @ 08022CBC r2 = r2 + 1
-    movs.w  r3, #0x80000                    @ 08022CBE r3 = 0x80000
-    muls    r2, r3, r2                      @ 08022CC2 r2 = r3 * r2
-    movs    r3, #0                          @ 08022CC4 r3 = 0
+    adds    r2, r2, #1                      @ 08022CBC r2 = C_SIZE + 1
+    @ OF-68: CardCapacity = (C_SIZE + 1) * 512 KiB as a 64-bit value.  v2.05 multiplied in 32 bits (0x08022CBE..0x08022CC4:
+    @ movs.w r3, #0x80000; muls; movs r3, #0), which wraps above 4 GiB (a 32 GB card: 1.72 GiB); v2.05 never used the
+    @ value, the port's disk_ioctl GET_SECTOR_COUNT does (f_mkfs sizes the volume by it, IMP-32)
+    lsrs    r3, r2, #13                     @ high word: (C_SIZE + 1) >> (32 - 19)
+    lsls    r2, r2, #19                     @ low word: (C_SIZE + 1) << 19
     strd    r2, r3, [r1, #0x48]             @ 08022CC6
     mov.w   r2, #0x200                      @ 08022CCA r2 = 0x200
     str     r2, [r1, #0x50]                 @ 08022CCE u32 [r1+0x50] = r2
@@ -1036,7 +1040,7 @@ FUNC sd_set_bus_width
     uxtb    r5, r5                          @ 08022F24 r5 = u8(r5)
     cmp     r5, #0                          @ 08022F26 compare r5 with 0
     bne     .Lsd_set_bus_width_2F90         @ 08022F28 if (r5 != 0) goto 0x8022F90
-    movs    r0, #1                          @ 08022F2A r0 = 1
+    movs    r0, #SD_CLKDIV_FULL             @ 08022F2A v2.05: 1 (SDIO_CK = SDIOCLK / 3)
     ldr     r1, =sdio_init_struct           @ 08022F2C r1 = &sdio_init_struct
     strb    r0, [r1, #0x14]                 @ 08022F2E u8 [sdio_init_struct+0x14] = r0
     movs    r0, #0                          @ 08022F30 r0 = 0
@@ -1065,7 +1069,7 @@ FUNC sd_set_bus_width
     uxtb    r5, r5                          @ 08022F60 r5 = u8(r5)
     cmp     r5, #0                          @ 08022F62 compare r5 with 0
     bne     .Lsd_set_bus_width_2F90         @ 08022F64 if (r5 != 0) goto 0x8022F90
-    movs    r0, #1                          @ 08022F66 r0 = 1
+    movs    r0, #SD_CLKDIV_FULL             @ 08022F66 v2.05: 1 (SDIO_CK = SDIOCLK / 3)
     ldr     r1, =sdio_init_struct           @ 08022F68 r1 = &sdio_init_struct
     strb    r0, [r1, #0x14]                 @ 08022F6A u8 [sdio_init_struct+0x14] = r0
     movs    r0, #0                          @ 08022F6C r0 = 0
@@ -1270,6 +1274,7 @@ FUNC sd_read_block
 ENDFUNC sd_read_block
     .ltorg
 
+    .if !SD_READ_ONLY                       @ the card write path (not in the read-only bootloader build)
 @ -----------------------------------------------------------------------------
 @ sd_write_blocks - start a block write by DMA (ST SD_WriteBlock / SD_WriteMultiBlocks)
 @ Replaces  : 0x08023100 FUN_08023100 (v2.05), called by disk_write
@@ -1519,6 +1524,8 @@ FUNC sd_wait_write
     cmp     r0, #0
     beq     .Lsd_wait_write_32F4
     movs    r5, #0                          @ the first wait ran out: CMD12 all the same (below), result 4
+    movs    r0, #1
+    bl      sd_dg_wtimeout                  @ diagnosis: wait 1 (DMA / transfer end), its length, the transfer state
     b       .Lsd_wait_write_3380
     @ sd_dma_end = 0, the second wait from now
 .Lsd_wait_write_3338:                   @ v2.05 0x08023338, reached from 0x080232FC, 0x08023306, 0x08023310, 0x0802331A
@@ -1540,6 +1547,8 @@ FUNC sd_wait_write
     cmp     r0, #0
     beq     .Lsd_wait_write_3350
     movs    r5, #0                          @ the second wait ran out: CMD12 all the same, result 4
+    movs    r0, #2
+    bl      sd_dg_wtimeout                  @ diagnosis: wait 2 (TXACT: the card's busy), its length, the transfer state
     @ stop condition: CMD12 (sd_stop_transfer)
 .Lsd_wait_write_3380:                   @ v2.05 0x08023380, reached from 0x08023358, 0x08023362
     ldr.w   r0, =sd_stop_condition          @ 08023380 r0 = &sd_stop_condition
@@ -1645,6 +1654,7 @@ FUNC sd_stop_transfer
     pop     {r4, pc}                        @ 08023400 pop {r4, pc}
 ENDFUNC sd_stop_transfer
     .ltorg
+    .endif                                  @ !SD_READ_ONLY
 
 @ -----------------------------------------------------------------------------
 @ sd_send_status - CMD13 SEND_STATUS (ST SD_SendStatus)
@@ -2439,6 +2449,142 @@ FUNC sd_enable_wide_bus
     pop     {r1, r2, r3, r4, r5, pc}        @ 08023A86 pop {r1, r2, r3, r4, r5, pc}
 ENDFUNC sd_enable_wide_bus
     .ltorg
+
+    .if !SD_READ_ONLY                       @ the card write path (not in the read-only bootloader build)
+@ -----------------------------------------------------------------------------
+@ sd_cmd_r1 - send a command with a short response (R1) and check it (sd_cmd_resp1_error, all static flags cleared)
+@ In        : r0 = argument, r1 = command index
+@ Out       : r0 = SD error code (0 = R1 without error bits)
+@ Clobbers  : r0-r3, r12, flags (r4 saved)
+@ Context   : main only
+@ -----------------------------------------------------------------------------
+LFUNC sd_cmd_r1
+    push    {r4, lr}
+    mov     r4, r1
+    ldr     r2, =sdio_cmd_struct
+    str     r0, [r2]                        @ argument
+    str     r1, [r2, #4]                    @ command index
+    movs    r0, #0x40
+    str     r0, [r2, #8]                    @ short response
+    movs    r0, #0
+    str     r0, [r2, #0xc]                  @ no wait for interrupt
+    mov.w   r0, #0x400
+    str     r0, [r2, #0x10]                 @ CPSM on
+    mov     r0, r2
+    bl      sdio_send_command
+    mov     r0, r4
+    bl      sd_cmd_resp1_error
+    uxtb    r0, r0
+    pop     {r4, pc}
+ENDFUNC sd_cmd_r1
+
+@ -----------------------------------------------------------------------------
+@ sd_num_wr_blocks - ACMD22 SEND_NUM_WR_BLOCKS: how many blocks the last write command wrote without error (IMP-40)
+@ Out       : r0 = SD error code (0 = the card answered), r1 = the number of blocks (the 32-bit value, MSB first on DAT0)
+@ Clobbers  : r0-r3, r12, flags (r4-r8 preserved)
+@ Context   : main only (disk_write, after a write whose busy wait ran out; the card is back in the transfer state)
+@ Spec      : SD Physical Layer Simplified 2.00, 4.3.4 (the host can ask with ACMD22 how many blocks were written correctly
+@             after an error), table 4-27 (ACMD22, R1, 32 bits on the data line).  Built as sd_find_scr (ACMD51): CMD16 with
+@             the length 4, CMD55, the data path for 4 bytes card to host, ACMD22 with only the command flags cleared
+@             (IMP-34), the FIFO read until DBCKEND and a word still in the FIFO after it; then all flags cleared and CMD16
+@             512 again (the block length every read and write of the driver assumes).
+@ -----------------------------------------------------------------------------
+FUNC sd_num_wr_blocks
+    push    {r4, r5, r6, r7, r8, lr}
+    movs    r6, #0                          @ words read
+    movs    r7, #0                          @ the raw word of the answer
+    movs    r0, #4
+    movs    r1, #0x10
+    bl      sd_cmd_r1                       @ CMD16 SET_BLOCKLEN 4
+    mov     r4, r0
+    cmp     r0, #0
+    bne     8f
+    ldr     r0, =sd_rca
+    ldr     r0, [r0]
+    lsls    r0, r0, #0x10
+    movs    r1, #0x37
+    bl      sd_cmd_r1                       @ CMD55 APP_CMD with the RCA
+    mov     r4, r0
+    cmp     r0, #0
+    bne     8f
+    ldr     r1, =sdio_data_struct
+    movs.w  r0, #-1
+    str     r0, [r1]                        @ data timeout: the largest
+    movs    r0, #4
+    str     r0, [r1, #4]                    @ 4 bytes
+    movs    r0, #0x20
+    str     r0, [r1, #8]                    @ block size 2^2
+    movs    r0, #2
+    str     r0, [r1, #0xc]                  @ card to host
+    movs    r0, #0
+    str     r0, [r1, #0x10]                 @ block mode
+    movs    r0, #1
+    str     r0, [r1, #0x14]                 @ DPSM on
+    ldr     r0, =sdio_data_struct
+    bl      sdio_data_config
+    ldr     r2, =sdio_cmd_struct
+    movs    r0, #0
+    str     r0, [r2]
+    movs    r0, #0x16
+    str     r0, [r2, #4]                    @ ACMD22
+    movs    r0, #0x40
+    str     r0, [r2, #8]
+    movs    r0, #0
+    str     r0, [r2, #0xc]
+    mov.w   r0, #0x400
+    str     r0, [r2, #0x10]
+    mov     r0, r2
+    bl      sdio_send_command
+    movs    r0, #0x16
+    movs    r1, #0xc5                       @ only the command flags: the data block can already be in (IMP-34)
+    bl      sd_cmd_resp1_keep
+    uxtb    r4, r0
+    cmp     r4, #0
+    bne     8f
+    movw    r8, #0x4e20                     @ 20000 polls, as the SCR read
+1:  ldr     r0, =(SDIO_BASE + SDIO_STA)
+    ldr     r0, [r0]
+    movw    r1, #0x62a                      @ DCRCFAIL, DTIMEOUT, RXOVERR, STBITERR, DBCKEND
+    tst     r0, r1
+    bne     2f
+    tst     r0, #0x200000                   @ RXDAVL: a word in the receive FIFO
+    beq     3f
+    bl      sdio_read_data
+    cbnz    r6, 4f
+    mov     r7, r0                          @ the first (only) word
+4:  adds    r6, r6, #1
+3:  subs    r8, r8, #1
+    bne     1b
+    movs    r4, #4                          @ no block end: timeout
+    b       8f
+2:  movw    r1, #0x22a                      @ DCRCFAIL, DTIMEOUT, RXOVERR, STBITERR
+    tst     r0, r1
+    beq     5f
+    movs    r4, #2                          @ data error
+    b       8f
+5:  cbnz    r6, 8f                          @ the word was read in the loop
+    ldr     r0, =(SDIO_BASE + SDIO_STA)
+    ldr     r0, [r0]
+    tst     r0, #0x200000
+    beq     6f
+    bl      sdio_read_data
+    mov     r7, r0
+    adds    r6, r6, #1
+    b       8f
+6:  movs    r4, #4                          @ block end without the word
+8:  movw    r0, #0x5ff
+    bl      sdio_clear_flag
+    mov.w   r0, #0x200
+    movs    r1, #0x10
+    bl      sd_cmd_r1                       @ CMD16 512 again
+    cbnz    r4, 9f
+    mov     r4, r0                          @ its error, when everything before went well
+9:  rev     r1, r7                          @ the count, MSB first on the bus
+    mov     r0, r4
+    pop     {r4, r5, r6, r7, r8, pc}
+ENDFUNC sd_num_wr_blocks
+    .ltorg
+    .endif                                  @ !SD_READ_ONLY
 
 @ -----------------------------------------------------------------------------
 @ sd_find_scr - read the 8-byte SCR register of the card by polling the FIFO (ST FindSCR)

@@ -36,6 +36,29 @@ sd_dg_cndtr:    .space 2                    @ DMA2 channel 4 CNDTR (words still 
 sd_dg_dcount:   .space 2                    @ SDIO_DCOUNT (bytes still to receive, low 16 bits)
 sd_dg_stahi:    .space 2                    @ SDIO_STA bits 31..16 (FIFO state)
 sd_dg_recov:    .space 2                    @ reads taken on the hardware counters after the end wait ran out
+    .global sd_dg_late, sd_dg_wphase, sd_dg_wticks, sd_dg_a22, sd_dg_retry
+sd_dg_late:     .space 2                    @ writes whose busy wait ran out but which ACMD22 confirmed as written (IMP-40)
+    .equ SD_WR_TRIES, 3                     @ attempts of a block whose write wait ran out (IMP-40)
+sd_dg_wticks:   .space 2                    @ last write wait that ran out: its length in 10 ms ticks
+sd_dg_a22:      .space 2                    @ last ACMD22 answer: 0x8000 | SD error << 8 | count (low byte); 0 none yet
+sd_dg_retry:    .space 2                    @ block writes repeated after a failed attempt (IMP-40)
+sd_dg_wphase:   .space 1                    @ first write wait of this power-on that ran out: 1 DMA / transfer end, 2 busy
+sd_wr_try:      .space 1                    @ failed attempts of the block being written
+sd_dg_wtry:     .space 1                    @ that first timeout: which attempt of its block (0 the first)
+    .balign 4
+sd_cur_sec:     .space 4                    @ the block disk_write is writing: sector
+sd_cur_buf:     .space 4                    @ ... and the address the DMA reads it from
+    .global sd_dg_wsec, sd_dg_wbuf, sd_dg_wccr, sd_dg_wcmar, sd_dg_wdctrl, sd_dg_wdlen, sd_dg_wfifo, sd_dg_wsta, sd_dg_wtry
+sd_dg_wsec:     .space 4                    @ first write timeout: the sector
+sd_dg_wbuf:     .space 4                    @ ... the DMA source address
+sd_dg_wcmar:    .space 4                    @ ... DMA2 channel 4 CMAR
+sd_dg_wsta:     .space 4                    @ ... SDIO_STA
+sd_dg_wccr:     .space 2                    @ ... DMA2 channel 4 CCR
+sd_dg_wdctrl:   .space 2                    @ ... SDIO_DCTRL
+sd_dg_wdlen:    .space 2                    @ ... SDIO_DLEN (low 16 bits)
+sd_dg_wfifo:    .space 2                    @ ... SDIO_FIFOCNT (words still to go through the FIFO)
+    .global sd_dg_wclkcr
+sd_dg_wclkcr:   .space 2                    @ ... SDIO_CLKCR (WIDBUS bits 12:11, CLKDIV bits 7:0)
     .global sd_dg_flags, sd_dg_dmaisr, sd_dg_cndtr, sd_dg_dcount, sd_dg_stahi, sd_dg_recov
     .balign 4
 sd_dg_r1:       .space 4                    @ card status of the last CMD13 answer before the failure (0xFFFFFFFF: no answer)
@@ -64,6 +87,7 @@ sd_bounce:      .space 512
 
 @ names of the v2.05 variables used in this file (addresses unchanged, DESIGN.md 5.1)
     .equ fat_fs_obj,              ff16_fatfs            @ FATFS work area of drive 0 (production: R0.16 exFAT FATFS, 572 bytes, in .bss_port, IMP-32; v2.05: 0x20006830)
+    .equ SD_STATUS_POLLS,         160000                @ CMD13 / end-wait polls: v2.05 20000 at 4 MHz, x8 at 32 MHz (IMP-41)
     .equ sd_card_info,            v_20007698            @ 0x20007698 card information record (sdcard.s): capacity u64 at +0x48
     .equ sd_stop_condition,       v_20007EF0            @ 0x20007EF0 1 = the running transfer is a multi-block write that needs CMD12; 0 = single block read
     .equ sd_transfer_end,         v_20007EF4            @ 0x20007EF4 set to 1 by the SDIO interrupt at the end of the data transfer
@@ -76,7 +100,7 @@ sd_bounce:      .space 512
 @ In        : r0 = number of tries (u8; 10)
 @ Out       : r0 = 0 ok (also when r0 tries = 0 and nothing was tried: the initial result 0), 1 or 2 = result of the last sd_bringup
 @ Clobbers  : r0-r3, r12, flags (v2.05 regeffects.txt; r4-r11 preserved)
-@ Context   : main only; the caller holds SYSCLK = HSE (sys_clock_select(1))
+@ Context   : main only; the caller holds the card-session clock (sys_clock_select(1): PLL 32 MHz, IMP-41)
 @ Spec      : v2.05 listing 0x0801F84C..0x0801F87D
 @ Note      : because sd_bringup reports success even when no card answers (see sd_bringup), this routine returns 0 after the first
 @             call in every case seen; the card is really tested by the first file call (fat_chk_mounted -> disk_initialize).
@@ -421,6 +445,62 @@ LFUNC sd_dg_note
     bx lr
 ENDFUNC sd_dg_note
 
+    .if !SD_READ_ONLY                       @ the card write path (not in the read-only bootloader build)
+@ sd_dg_wtimeout - diagnosis: a write wait of sd_wait_write ran out (r0 = 1 the DMA / transfer end, 2 the card's busy;
+@ r3 = the tick when that wait began): its length, and the transfer state as sd_dg_end_state records it for a read
+@ (end flags, DMA flags and CNDTR, DCOUNT, SDIO_STA high half: values 7 .. 11 of the Bluetooth diagnosis); clobbers r0-r3
+FUNC sd_dg_wtimeout
+    push {r4, lr}
+    mov r4, r3                              @ r4 = the tick when the wait began (r0-r3 are used below)
+    ldr r1, =sd_dg_wphase
+    ldrb r2, [r1]
+    cbnz r2, 9f                             @ only the first timeout of this power-on is kept (later attempts follow it)
+    strb r0, [r1]
+    ldr r1, =sd_wr_try
+    ldrb r0, [r1]
+    ldr r1, =sd_dg_wtry
+    strb r0, [r1]
+    ldr r1, =sd_cur_sec
+    ldr r0, [r1]
+    ldr r1, =sd_dg_wsec
+    str r0, [r1]
+    ldr r1, =sd_cur_buf
+    ldr r0, [r1]
+    ldr r1, =sd_dg_wbuf
+    str r0, [r1]
+    ldr r1, =(DMA2_BASE + DMA_CH4_CCR)
+    ldr r0, [r1]
+    ldr r2, =sd_dg_wccr
+    strh r0, [r2]
+    ldr r0, [r1, #12]                       @ CMAR (CCR + 0x0C: CNDTR + 4, CPAR + 8, CMAR + 12)
+    ldr r2, =sd_dg_wcmar
+    str r0, [r2]
+    ldr r1, =SDIO_BASE
+    ldr r0, [r1, #SDIO_DCTRL]
+    ldr r2, =sd_dg_wdctrl
+    strh r0, [r2]
+    ldr r0, [r1, #SDIO_DLEN]
+    ldr r2, =sd_dg_wdlen
+    strh r0, [r2]
+    ldr r0, [r1, #SDIO_FIFOCNT]
+    ldr r2, =sd_dg_wfifo
+    strh r0, [r2]
+    ldr r0, [r1, #SDIO_STA]
+    ldr r2, =sd_dg_wsta
+    str r0, [r2]
+    ldr r0, [r1, #SDIO_CLKCR]
+    ldr r2, =sd_dg_wclkcr
+    strh r0, [r2]
+    ldr r1, =v_20007FC6
+    ldrh r0, [r1]
+    subs r0, r0, r4                         @ ticks since the wait began
+    ldr r1, =sd_dg_wticks
+    strh r0, [r1]
+    bl sd_dg_end_state
+9:  pop {r4, pc}
+ENDFUNC sd_dg_wtimeout
+    .endif                                  @ !SD_READ_ONLY
+
 @ sd_dg_start - diagnosis: the status polling of a block begins now (tick counter v_20007FC6); clobbers r0, r1
 LFUNC sd_dg_start
     ldr r0, =v_20007FC6
@@ -495,7 +575,7 @@ FUNC disk_read
     ite     eq
     moveq   r4, r8                          @ aligned: the block goes straight to the caller's buffer
     ldrne   r4, =sd_bounce                  @ not aligned: into sd_bounce, copied out below
-    movw    r7, #0x4E20                     @ r7 = 20000 status polls (v2.05 0x08023F8C)
+    ldr     r7, =SD_STATUS_POLLS            @ r7 = status polls (v2.05 0x08023F8C: 20000; IMP-41: x8 for 32 MHz)
     movs    r0, #0x200
     str     r0, [sp]                        @ block length 0x200 (5th argument)
     lsls    r2, r5, #9                      @ r2:r3 = 64-bit byte address = sector * 512 (sd_read_block turns it into the block
@@ -526,7 +606,7 @@ FUNC disk_read
     @ OF-59: the card has sent the block; wait for the SDIO data end and the DMA end, or an SDIO error (v2.05 takes the
     @ buffer as soon as the card is back in the transfer state and never looks at sd_transfer_error)
 .Ldr_end:
-    movw    r7, #0x4E20                     @ at most 20000 polls
+    ldr     r7, =SD_STATUS_POLLS            @ at most SD_STATUS_POLLS polls (v2.05 20000, IMP-41: x8)
 1:  ldr     r0, =sd_transfer_error
     ldrb    r0, [r0]
     cmp     r0, #0
@@ -584,6 +664,7 @@ FUNC disk_read
     .ltorg
 ENDFUNC disk_read
 
+    .if !SD_READ_ONLY                       @ the card write path (not in the read-only bootloader build)
 @ -----------------------------------------------------------------------------
 @ disk_write - write r3 sectors to the SD card (FatFs disk_write)
 @ Replaces  : 0x08023FB8 FUN_08023FB8 (v2.05), called by fat_move_window, fat_f_read, fat_f_write, fat_f_sync, fat_f_lseek, fat_sync_fs
@@ -615,6 +696,8 @@ FUNC disk_write
     movs    r4, #0                          @ 08023FCC r4 = 0
     movs    r0, #0                          @ 08023FCE r0 = 0
     movs    r7, r0                          @ 08023FD0 r7 = r0
+    ldr     r1, =sd_wr_try
+    strb    r0, [r1]                        @ IMP-40: no failed attempt of this block yet
     @ loop over the sectors: buffer offset 512 * i, 64-bit byte address (first sector + i) * 512
 .Ldisk_write_3FD2:                      @ v2.05 0x08023FD2, reached from 0x08024026
     cmp     r7, r6                          @ 08023FD4 compare r7 with r6
@@ -631,6 +714,9 @@ FUNC disk_write
     ldr     r8, =sd_bounce
 2:
     adds    r1, r5, r7                      @ r1 = sector of this block (first sector + i)
+    ldr     r0, =sd_cur_sec
+    str     r1, [r0]                        @ diagnosis: the block and its DMA source (sd_dg_wtimeout)
+    str     r8, [r0, #4]                    @ sd_cur_buf follows sd_cur_sec
     lsls    r4, r1, #9                      @ r4 = low word of the byte address sector * 512
     lsrs    r1, r1, #23                     @ r1 = upper word (OF-57: v2.05 computes (first << 9) + 512 * i in 32 bits,
                                             @ 0x08023FE4..0x08023FEA, and passes 0 as the upper word, 0x08023FFC)
@@ -653,7 +739,7 @@ FUNC disk_write
     str     r0, [sp, #8]                    @ OF-59: [sp+8] = non-zero when sd_wait_write failed or the SDIO reported an error
                                             @ (CRC status token negative, timeout, underrun); the card is still polled below
     bl      sd_dg_start                     @ diagnosis: the polling begins
-    movw    r0, #0x4e20                     @ 08024008
+    ldr     r0, =SD_STATUS_POLLS            @ 08024008 (v2.05 20000; IMP-41: x8 for the 32 MHz card-session clock)
     mov     r9, r0                          @ 0802400C r9 = r0
     @ poll the card state with CMD13 up to 20000 times: transfer state = ready
 .Ldisk_write_400E:                      @ v2.05 0x0802400E, reached from 0x0802401E
@@ -670,7 +756,52 @@ FUNC disk_write
 .Ldisk_write_4024:                      @ v2.05 0x08024024, reached from 0x08024014
     ldr     r0, [sp, #8]
     cbz     r0, 1f
+    @ IMP-40: the busy wait only ran out of time (sd_wait_write 4: no SDIO error, CMD12 answered) and the card is back in
+    @ the transfer state: a card may stay busy longer than the 600 ms wait (on a meter, 2026-11-05, a 32 GB card during
+    @ f_mkfs: wait 4, then status 0x00000900 tran, READY_FOR_DATA; the format stopped and left the card without a file
+    @ system).  ACMD22 tells whether the block was written; only 1 block written counts as done.
     ldr     r0, =sd_dg_wait
+    ldrb    r0, [r0]
+    cmp     r0, #4
+    bne     3f
+    ldr     r0, =sd_transfer_error
+    ldrb    r0, [r0]
+    cbnz    r0, 3f
+    bl      sd_num_wr_blocks
+    uxtb    r2, r1
+    orr     r2, r2, r0, lsl #8
+    orr     r2, r2, #0x8000                 @ marks an answer
+    ldr     r3, =sd_dg_a22
+    strh    r2, [r3]                        @ diagnosis: SD error << 8 | count
+    cbnz    r0, 3f
+    cmp     r1, #1
+    bne     3f
+    ldr     r1, =sd_dg_late
+    ldrh    r0, [r1]
+    adds    r0, r0, #1
+    strh    r0, [r1]                        @ diagnosis: a late block confirmed by the card
+    b       1f
+3:  ldr     r0, =sd_dg_wait
+    ldrb    r0, [r0]
+    cmp     r0, #4
+    bne     4f                              @ only a wait that ran out is repeated (a CRC error stays as before, OF-59)
+    ldr     r0, =sd_transfer_error
+    ldrb    r0, [r0]
+    cbnz    r0, 4f
+    ldr     r1, =sd_wr_try
+    ldrb    r0, [r1]
+    adds    r0, r0, #1
+    strb    r0, [r1]
+    cmp     r0, #SD_WR_TRIES
+    bhs     4f
+    @ IMP-40: the card is back in the transfer state (the polling above ended there): the same block is written again;
+    @ writing a sector twice leaves what the second write wrote, and FatFs (f_mkfs above all) does not repeat a failed call
+    ldr     r1, =sd_dg_retry
+    ldrh    r0, [r1]
+    adds    r0, r0, #1
+    strh    r0, [r1]                        @ diagnosis: one more repeated block
+    b       .Ldisk_write_3FD2
+4:  ldr     r0, =sd_dg_wait
     ldrb    r0, [r0]
     cmp     r0, #0
     ite     ne
@@ -680,12 +811,16 @@ FUNC disk_write
     movs    r0, #1                          @ OF-59: the block was not written: RES_ERROR
     b       .Ldisk_write_402A
 1:  adds    r7, r7, #1                      @ 08024024 r7 = r7 + 1
+    movs    r0, #0
+    ldr     r1, =sd_wr_try
+    strb    r0, [r1]                        @ the next block starts without a failed attempt
     b       .Ldisk_write_3FD2               @ 08024026 goto 0x8023FD2
 .Ldisk_write_4028:                      @ v2.05 0x08024028, reached from 0x08023FD6
     movs    r0, #0                          @ 08024028 r0 = 0
 .Ldisk_write_402A:                      @ v2.05 0x0802402A, reached from 0x08024022
     pop.w   {r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, pc}@ 0802402A pop {r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, pc}
 ENDFUNC disk_write
+    .endif                                  @ !SD_READ_ONLY
 
 @ -----------------------------------------------------------------------------
 @ sd_copy512 - copy one sector (512 bytes) between any two addresses, byte by byte (OF-66)

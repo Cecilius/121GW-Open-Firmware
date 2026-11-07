@@ -62,8 +62,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        script: [test_sd_scr.py, test_sd_errors.py, test_dcv_fast.py, test_bft_files.py, test_bft_settings.py,
-                 test_calbin_ident.py]
+        # test_sd_errors.py in two jobs of its case groups (all five cases in one job ran past the job limit on slow
+        # runners; owner decision 2026-11-07)
+        script: [test_sd_scr.py, 'test_sd_errors.py --cases write,read,burst20', 'test_sd_errors.py --cases forced,burst_all',
+                 test_dcv_fast.py, test_bft_files.py, test_bft_settings.py,
+                 test_calbin_ident.py, test_sd_capacity.py, test_sd_slow.py, test_sd_clock.py,
+                 test_cap_timeout.py, test_cap_antihunt.py, test_ble_overrun.py, test_xdiag.py, test_msical.py, test_apo_wake.py,
+                 test_apo_time.py]
     steps:
       - uses: actions/checkout@v7
       - name: Production build (firmware/build/EEVBlog.bin and 121gw.map, the symbols the tests read; dist/v205_tables.json)
@@ -99,7 +104,7 @@ jobs:
           name: firmware-dist
           path: dist
       - name: Install build tools
-        run: python -m pip install unicorn==2.1.4 capstone==5.0.9 pyinstaller==6.22.3 pillow pywebview==6.1
+        run: python -m pip install unicorn==2.1.4 capstone==5.0.9 certifi==2026.10.23 pyinstaller==6.22.3 pillow pywebview==6.1
       - name: Prepare the emulator data (v2.05 tables, synthetic EEPROM) and icons
         run: |
           python -I emulator/tools/prepare_data.py --dist dist
@@ -174,7 +179,7 @@ jobs:
           name: firmware-dist
           path: dist
       - name: Install build tools
-        run: python -m pip install unicorn==2.1.4 capstone==5.0.9 pillow
+        run: python -m pip install unicorn==2.1.4 capstone==5.0.9 certifi==2026.10.23 pillow
       - name: Prepare the emulator data and icons
         run: |
           python -I emulator/tools/prepare_data.py --dist dist
@@ -191,7 +196,7 @@ jobs:
           powershell -NoProfile -Command "Expand-Archive -Path pyembed.zip -DestinationPath '$out/python'"
           # module search path of the embedded interpreter: its stdlib, its site-packages and the emulator sources
           printf 'python311.zip\r\n.\r\nLib\\site-packages\r\n..\\app\r\nimport site\r\n' > "$out/python/python311._pth"
-          python -m pip install --no-compile --target "$out/python/Lib/site-packages" unicorn==2.1.4 capstone==5.0.9 pywebview==6.1
+          python -m pip install --no-compile --target "$out/python/Lib/site-packages" unicorn==2.1.4 capstone==5.0.9 certifi==2026.10.23 pywebview==6.1
           cp -r emulator/app.py emulator/launcher.py emulator/emu emulator/ui emulator/data "$out/app/"
           cp build/icons/121gw-emulator.ico "$out/app/"
           cp LICENSE "$out/"
@@ -272,7 +277,7 @@ jobs:
           name: firmware-dist
           path: dist
       - name: Install build tools
-        run: python -m pip install unicorn==2.1.4 capstone==5.0.9 pyinstaller==6.22.3 pillow
+        run: python -m pip install unicorn==2.1.4 capstone==5.0.9 certifi==2026.10.23 pyinstaller==6.22.3 pillow
       - name: Prepare the emulator data and icons
         run: |
           python -I emulator/tools/prepare_data.py --dist dist

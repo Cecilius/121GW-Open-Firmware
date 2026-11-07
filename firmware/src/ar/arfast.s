@@ -76,6 +76,13 @@ ar_state:
     .global ar_freq_tmo_count
 ar_freq_tmo_count:
     .space 1
+@ ar_ohm_jump (owner AR): 0, or 1 + the top range when ar_sample has just jumped there from a saturated OHM sample.
+@ The first step down from that range is the measured correction of the jump: it is not refused by the OHM direction
+@ guard (fn_0800E2A0), which would otherwise hold the low-resolution top-range reading for 1 s.  Cleared by that
+@ step, by any other range change of ar_sample, by a reading that belongs to the top range, and by every apply that
+@ ar_sample did not request (dial, MODE, RANGE, autorange_step).
+ar_ohm_jump:
+    .space 1
 
     .section .rodata.ar, "a", %progbits
     .balign 4
@@ -232,9 +239,9 @@ ENDFUNC ar_decision_pending
 @ Clobbers : r0-r3, r12, flags (r4-r6 saved)
 @ Context  : main (tail call of fn_0800DB48, which has just stored the v2.05 settle count in 0x20000238)
 @ RAM      : writes 0x200080F8 (ar_ol_latch) = 0, ar_state (counts 0, discard n, blank progress, timeout mark, last mode),
-@            ui_blank_req (W3), 0x20000238 (TP only); reads 0x20000238, ar_freq_tmo_count
+@            ui_blank_req (W3), 0x20000238 (TP only); reads 0x20000238, ar_freq_tmo_count; the anti-hunting state (ah_apply_note)
 @ Spec     : analysis/autorange_and_scheduler.md 5.2 P4 (settle after a change)
-@ Deviation: OF-20 (latch), OF-32 (blank request), IMP-01 (settle profiles)
+@ Deviation: OF-20 (latch), OF-32 (blank request), IMP-01 (settle profiles), IMP-45 (anti-hunting: ah_apply_note first)
 @
 @ ui_blank_req (firmware/requests/W3_to_W4.md 1): set to 1 in FREQ, PULSE, DUTY and BEEP, cleared in every mode but
 @ LowZ (mode 0, owned by MRES: there only a request of 1 left by the previous mode is withdrawn); ar_result_seen
@@ -252,11 +259,16 @@ ENDFUNC ar_decision_pending
 @ -----------------------------------------------------------------------------
 FUNC ar_apply
     push {r4, r5, r6, lr}
+    bl ah_apply_note                        @ IMP-45: an apply that leaves CAP range 1 / 2 ends the anti-hunting lock (r0, r1 kept)
     movs r3, #0
     ldr r2, =ar_ol_latch
     strb r3, [r2]                           @ the overload hysteresis starts clear at every apply (OF-20)
     ldr r4, =ar_state
-    strb r3, [r4, #AR_ST_OVER]              @ no confirmation under way
+    ldrb r2, [r4, #AR_ST_PEND]
+    cbnz r2, 9f
+    ldr r2, =ar_ohm_jump
+    strb r3, [r2]                           @ an apply ar_sample did not request: no jump correction pending
+9:  strb r3, [r4, #AR_ST_OVER]              @ no confirmation under way
     strb r3, [r4, #AR_ST_UNDER]
     strb r3, [r4, #AR_ST_DISCARD]
     strb r3, [r4, #AR_ST_FIRST]             @ no blank request in progress
@@ -381,9 +393,10 @@ ENDFUNC ar_apply
 @ Context  : main (called by MDC, MAC and MRES after each conversion and before it is accumulated)
 @ RAM      : reads 0x200080F8, 0x20000238, 0x2000803C, 0x2000803D, 0x2000808A, range_manual, minmax_state,
 @            hold_active, hold_stage2, 0x2000804A, 0x2000804B, range_count, full_scale_table; writes
-@            meter_range, 0x2000804B, 0x2000805C (blank), 0x200080A2 (CAP) and ar_state
+@            meter_range, 0x2000804B, 0x2000805C (blank), 0x200080A2 (CAP) and ar_state; ah_block_down reads the
+@            anti-hunting state and may take the lock (ah_lock)
 @ Spec     : analysis/autorange_and_scheduler.md 5.2 P2, P3 (thresholds U and L of autorange_step)
-@ Deviation: IMP-01
+@ Deviation: IMP-01, IMP-45
 @
 @ The sample is judged only when v2.05's autorange_step would also be allowed to range: ranging by samples needs
 @ automatic range, no MIN/MAX, no HOLD, no calibration mode, two or more ranges, a settled range (mode_settle = 0)
@@ -397,6 +410,8 @@ ENDFUNC ar_apply
 @         uses L = FS/100 in CAP range 5, 0x0800DFB6)
 @ The OHM direction guard (fn_0800E2A0) may refuse the step; the confirmation is then kept and tried again with the
 @ next sample.
+@ IMP-45: a step down from CAP range 2 is refused whatever its target while the anti-hunting lock is set (ah_block_down at
+@ .Las_do_down, before the OHM guard and before 0x200080A2 is stored); the confirmation count is kept.
 @ -----------------------------------------------------------------------------
 FUNC ar_sample
     push {r4, r5, r6, r7, r8, r9, r10, lr}
@@ -477,6 +492,8 @@ FUNC ar_sample
 @ range 0 (cannot go down) or |value| >= L: between the thresholds
 .Las_inband:
     movs r2, #0                             @ between L and U: the confirmation starts again
+    ldr r3, =ar_ohm_jump
+    strb r2, [r3]                           @ the reading belongs here: a jump needs no correction
     strb r2, [r10, #AR_ST_OVER]
     strb r2, [r10, #AR_ST_UNDER]
     b .Las_accept
@@ -500,8 +517,16 @@ FUNC ar_sample
     adds r9, r6, #1                         @ saturated: one range up ...
     cmp r5, #MODE_OHM
     bne .Las_do_up
-    mov r9, r2                              @ ... but OHM jumps to the top range
-    b .Las_do_up
+    mov r9, r2                              @ ... but OHM jumps to the top range, whose reading then gives the target
+    movs r0, #1
+    bl fn_0800E2A0                          @ OHM direction guard for an up step (1 = refused)
+    cmp r0, #0
+    bne .Las_accept
+    bl .Las_commit_sub                      @ commit the jump (clears ar_ohm_jump) ...
+    adds r2, r9, #1
+    ldr r3, =ar_ohm_jump
+    strb r2, [r3]                           @ ... and mark it: the next step down is its correction
+    b .Las_accept
 @ confirmed and not saturated: find the lowest range that holds the value
 .Las_search_up:
     subs r4, r4, #1                         @ r4 = |value| - 1: lower bound of the true value
@@ -571,7 +596,21 @@ FUNC ar_sample
     b .Las_dn_loop
 @ target range in r9 (0 when none higher holds the value): ask the OHM direction guard, then commit
 .Las_do_down:
-    movs r0, #0
+    @ IMP-45: CAP range 2 locked by the anti-hunting rule (SETUP page HUnt): no step down, whatever the target (this
+    @ includes a jump from range 2 to range 0), before the OHM guard and before ar_cap_small is stored below.  r4 = |X|
+    mov r0, r4
+    bl ah_block_down                        @ r0 = 1 refuse; the lock is taken here when two range-1 timeouts were counted
+    cmp r0, #0
+    bne .Las_accept
+    ldr r3, =ar_ohm_jump
+    ldrb r2, [r3]
+    subs r2, r2, #1
+    cmp r2, r6
+    bne 7f                                  @ not the first step down after an OHM jump to this range
+    movs r2, #0
+    ldr r3, =ar_ohm_dir
+    strb r2, [r3]                           @ the correction of the jump is measured, not a reversal: the guard allows it
+7:  movs r0, #0
     bl fn_0800E2A0                          @ OHM direction guard for a down step (1 = refused)
     cmp r0, #0
     bne .Las_accept
@@ -586,6 +625,23 @@ FUNC ar_sample
     strb r2, [r3]
 @ change the range: new range, apply request for the main loop, blank request, restart the confirmation
 .Las_commit:
+    bl .Las_commit_sub
+    b .Las_accept
+@ the commit itself, a local subroutine (r9 = new range, r5 = mode, r10 = ar_state; clobbers r0-r3, lr)
+.Las_commit_sub:
+    push {lr}
+    movs r2, #0
+    ldr r3, =ar_ohm_jump
+    strb r2, [r3]                           @ a new range: any jump correction is done or void
+    cmp r5, #MODE_OHM
+    bne 1f
+    ldr r2, =hold_stage2
+    ldrb r2, [r2]
+    cbnz r2, 1f                             @ auto-hold stage 2 keeps its digits, as the v2.05 blank rule (0x08016FEC)
+    movs r0, #0
+    bl fn_08019A98                          @ OHM: blank the main digits now (v2.05 decides and blanks in the same pass);
+1:                                          @ the apply draws the new decimal point and its skip counter (2 updates for
+                                            @ r1..r5) holds the display stage, which would leave the old digits standing
     ldr r2, =meter_range
     strb r9, [r2]                           @ new range
     movs r2, #1
@@ -597,6 +653,7 @@ FUNC ar_sample
     movs r2, #0
     strb r2, [r10, #AR_ST_OVER]
     strb r2, [r10, #AR_ST_UNDER]
+    pop {pc}
 @ the sample is accepted into the mean
 .Las_accept:
     movs r0, #0

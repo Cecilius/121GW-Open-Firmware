@@ -28,13 +28,26 @@
     .equ FW_VER_C0, 'F'
     .equ FW_VER_C1, '-'
     .equ FW_VER_C2, '1'
-    .equ FW_VER_C3, '0'
-    .equ FW_VER_C4, '6'
+    .equ FW_VER_C3, '1'
+    .equ FW_VER_C4, '8'
 
     @ DEBUG = 1 sets DBGMCU_CR DBG_SLEEP | DBG_STOP | DBG_STANDBY at every start as v2.05 does (0x0801BEF8).
     @ Production (0) leaves DBGMCU_CR alone so STOP is the true low-current STOP (NF-18, RM0038 30.16.3).
     .ifndef DEBUG
     .equ DEBUG, 0                       @ SWITCH DEBUG default 0 (NF-18)
+    .endif
+
+    @ BLE_AT_POWERUP = 1 switches Bluetooth on at every power-up as a long PEAK does (ble/blcmd.s blcmd_ble_on), so a
+    @ computer can reach a development build without a key press.  Production (0): off at power-up, as v2.05.
+    @ SD_READ_ONLY = 1 leaves the card write path out of sd/sdcard.s and sd/diskio.s (block write, write wait, stop,
+    @ ACMD22, disk_write, the write-timeout diagnosis): the bootloader, which only reads the card, assembles its own
+    @ copies of the two files with it (bootloader/Makefile).  The firmware is built with 0.
+    .ifndef SD_READ_ONLY
+    .equ SD_READ_ONLY, 0                @ SWITCH SD_READ_ONLY default 0 (1 only in the bootloader's own build)
+    .endif
+
+    .ifndef BLE_AT_POWERUP
+    .equ BLE_AT_POWERUP, 0              @ SWITCH BLE_AT_POWERUP default 0 (development builds only)
     .endif
 
     @ MPU_GUARD = 1 makes program flash 0x08000000..0x0807FFFF and the option-byte page 0x1FF80000..0x1FF800FF

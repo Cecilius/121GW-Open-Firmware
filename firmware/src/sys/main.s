@@ -73,6 +73,9 @@ FUNC sys_main
     ldrb r0, [r0]
     bl lcd_init                             @ lcd_init(contrast, 1) (0x08024B62)
     bl sys_bootwin_begin                    @ power-on window (FUN_0800EA3A at 0x08024B66)
+    .if BLE_AT_POWERUP
+    bl blcmd_ble_on                         @ development build: Bluetooth on as a long PEAK would switch it on
+    .endif
 
     @ ---------------------------------------------------------------- main loop 0x08024B6A..0x08024DDE
     @ r4 = scratch across calls (callee-saved)
@@ -387,6 +390,7 @@ FUNC sys_system_init
 .Lssi_vos_ok:
     movs r0, #0
     bl sys_clock_select                     @ run clock (0x0801BEEC)
+    bl ck_run                               @ IMP-46: MSI measured against HSE and trimmed (sys/msical.s)
     bl rcc_lsi_as_rtc_lcd_clock             @ 0x0801BEF0
     .if DEBUG
     movs r1, #1

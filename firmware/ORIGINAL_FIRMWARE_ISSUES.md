@@ -80,6 +80,12 @@ semantics, fix waits for owner approval; **by design** = documented, judged inte
 | OF-65 | BLE | The status frame's bar byte (14) carries the raw segment count, which exceeds the 25 segments of the display on an overload (45..55 seen); an application that masks the byte (the official one reads it & 0x1F) shows a wrong bar | low | fixed |
 | OF-66 | SD card | disk_read / disk_write give the caller's buffer to the SDIO DMA, which aligns every word access down: a sector read into or written from a buffer that is not a multiple of 4 lands 1..3 bytes off (FatFs passes the caller's buffer for whole sectors) | medium | fixed |
 | OF-67 | Keys | Holding MEM while switching on (the cal.bin backup / restore entry) for longer than the long-press time also starts logging; the following MODE then does not confirm the backup or restore | medium | fixed |
+| OF-68 | SD card | The capacity of a high-capacity card is computed in 32 bits and wraps above 4 GiB (a 32 GB card reads as 1.72 GiB); unused in v2.05, but the port's card format sized the volume by it | medium | fixed |
+| OF-69 | SD card | Card sessions run the CPU on the 4 MHz crystal with the PLL at a 48 MHz VCO, where the reference manual requires 96 MHz for the SDIO; on a meter block writes stopped with a transmit underrun | medium | fixed |
+| OF-70 | Clock | The reset clock set-up raises the CPU clock 7.6-fold in one step; the reference manual allows less than 4-fold per step | low | fixed |
+| OF-71 | Bluetooth | The USART2 receive interrupt returns without reading USART_DR when RXNE is clear; an overrun flag (ORE) that is set with RXNE = 0 also raises this interrupt and is then never cleared, so the interrupt repeats for ever | medium | fixed |
+| OF-73 | Power | After auto power-off the meter wakes from STOP on a key or dial turn but hangs in the restart: a timer interrupt left asserted with the timer's clock off is entered again for ever | high (the meter could only be restarted with the dial) | fixed |
+| OF-72 | Bluetooth | The baud computation of USART_Init drops the carry of the rounded fraction: for a clock 2.3 .. 2.5 % above nominal the Bluetooth serial line runs 7 % too fast | low (reachable only with the measured clock) | fixed |
 
 ## Details
 
@@ -1015,3 +1021,82 @@ nothing useful, and the card gets a log file instead of cal.bin.  Measured in th
 v2.05 and the port: MEM held 1.5 s at power-on, then REL and MODE: both images wrote 26010100.CSV and no CAL.BIN; MEM held
 0.4 s: both saved.  Found on a meter (2026-11-05): holding MEM while turning the dial on is the natural way to do it.
 Port: while the sequence is under way (key_win_b 1..3) the long MEM is ignored.
+
+### OF-68 — the capacity of a card above 4 GiB wraps
+sd_get_card_info (v2.05 FUN_08022AE4, 0x08022CBC..0x08022CC6) stores the capacity of a high-capacity card (CSD version
+2.0) as (C_SIZE + 1) * 0x80000 with a 32-bit `muls` and a zero high word, so a card above 4 GiB gets the remainder: a 32 GB
+card (C_SIZE 60871) reads as 1 849 688 064 bytes (1.72 GiB).  v2.05 never used the value (its disk_ioctl answered
+GET_SECTOR_COUNT with the constant 0x20000).  The port's disk_ioctl hands the capacity to f_mkfs (IMP-32), so a card
+formatted on the meter (page `Fr`) got a 1.72 GiB volume.  Found on a meter (2026-11-05): a 32 GB card formatted on the
+meter showed 1.72 GB total in the Companion.  Port: the capacity is (C_SIZE + 1) << 19 as a 64-bit value.  Emulator
+`test_sd_capacity.py`: a 32 GB card holds the full 31 914 459 136 bytes in the record (v1.0.7: 1 849 688 064).
+A card already formatted this way keeps its small volume until it is formatted again.
+
+### OF-69 — card sessions on the 4 MHz crystal, PLL VCO 48 MHz
+FUN_0801BF1A(1) (0x0801BF5C..0x0801BF6E) switches SYSCLK to HSE for every card access; the PLL set up at reset
+(SetSysClock, HSE x12 /3, 0x08026066..0x0802607C) gives a 48 MHz VCO and so SDIOCLK = VCO / 2 = 24 MHz.  RM0038 6.2: "If
+the USB or SDIO interface is used ... the PLL VCO clock ... must be programmed to output a 96 MHz frequency".  With
+HCLK 4 MHz and SDIO_CK 8 MHz (ClockDiv 1) the CPU has 16 cycles per 32-bit word the SDIO sends.  On a meter
+(2026-11-05, the port F-1.08 .. F-1.11, which keeps this clock plan, 32 GB SanDisk card) block writes stopped with
+TXUNDERR after DMA2 channel 4 had moved 3 of 128 words, and the card format failed.  Experiments on the meter: ClockDiv 4
+(SDIO_CK 4 MHz) passed, a card clock held off until the FIFO was full passed (170 s per format), a delay after the DMA
+start failed.  How v2.05 itself behaves with this card was not tested.  Port (IMP-41): a card session runs on the PLL,
+HSE x24 /3 = 32 MHz, VCO 96 MHz, SDIOCLK 48 MHz.  Verified working on a meter: three formats in 16 s each, logging and a
+download without a failed block.
+
+### OF-70 — the reset clock set-up raises the clock 7.6-fold in one step
+SetSysClock (0x08026092..0x080260A8) selects the PLL (16 MHz) while the CPU runs on MSI at 2.097 MHz.  RM0038 6.2.7 note:
+"the final frequency is less then 4 x initial frequency to limit the VCORE drop due to a current consumption peak when
+the frequency increases. It must also respect 5 us delay between two changes" (the same rule as datasheet Table 4 note
+2).  Port: SW = PLL is written together with HPRE = /2 (8 MHz, 3.8 x), then after at least 5 us HPRE = /1 (16 MHz, 2 x).
+No failure on a meter has been traced to this.
+
+### OF-71 — an overrun with RXNE clear is never cleared, the receive interrupt repeats for ever
+The USART2 handler (IRQ38_Handler 0x080247D8..0x080248AE) asks `USART_GetITStatus(USART2, 0x525)` (call 0x08024826) and
+ends at 0x080248AE (`beq`, 0x0802482C) when the answer is 0. FUN_0801CC7C (0x0801CC7C..0x0801CCEA) answers 1 only if
+CR1 bit 5 (RXNEIE: `ldrh r2,[r3,#0xc]` 0x0801CCAC, mask 1 << (0x525 & 0x1F)) and SR bit 5 (RXNE: `lsrs r2,r2,#0x8`
+0x0801CCC4, `ldrh r2,[r3,#0x0]` 0x0801CCD0) are both set. USART_DR is read only after that check (FUN_0801CC00,
+`ldrh r0,[r0,#0x4]` at 0x0801CC00, called at 0x08024830). The initialisation enables only this interrupt
+(`movs r2,#0x1` 0x0801C426, `movw r1,#0x525` 0x0801C428, FUN_0801CC08 at 0x0801C430; the handler's TXE part uses 0x727).
+RM0038 27.3.3 (rm0038.txt lines 39425-39448) says of an overrun: "An interrupt is generated if either the RXNEIE bit is
+set or both the EIE and DMAR bits are set" and "The ORE bit is reset by a read to the USART_SR register followed by a
+USART_DR register read operation"; the note adds that ORE can be set with RXNE = 0: "if RXNE=0, then it means that the
+last valid data has already been read ... It may also occur when the new data is received during the reading sequence
+(between the USART_SR register read access and the USART_DR read access)". The same follows from the ORE bit
+description (27.6.1, lines 41229-41232: "An interrupt is generated if RXNEIE=1 in the USART_CR1 register. It is cleared
+by a software sequence (an read to the USART_SR register followed by a read to the USART_DR register)").
+So v2.05 has the same structure as the port had until F-1.14: with ORE = 1, RXNE = 0 and RXNEIE = 1 the interrupt line
+is active, the handler finds RXNE clear, returns without reading DR, and is entered again at once; nothing else in the
+handler clears ORE (the handler never reads the ORE bit). A byte arriving at the moment the handler reads the last
+byte is enough to reach this state; at 19200 baud one byte lasts 0.52 ms. Not observed on a meter; found by
+reading RM0038 against the handler. Port (F-1.15): `ble_usart2_isr` (`ble/usart.s`) reads SR once; with RXNE = 0,
+ORE = 1 and RXNEIE = 1 it reads DR once (the sequence that clears ORE), drops the lost byte and counts the overrun for
+the extended link diagnosis (IMP-44); every other path is unchanged. Emulator `test_ble_overrun.py` puts the state
+RXNE = 0, ORE = 1 in place with the USART model (a byte arriving between the SR read and the DR read) and checks that ORE
+is clear 50 ms after the interrupt is enabled (F-1.14: it stays set).
+
+### OF-72 — the USART_Init fraction loses its carry
+`fn_0801CAEC` (USART_Init of the StdPeriph library, 0x0801CAEC..0x0801CBD0) computes r7 = 25 x PCLK / (4 x baud)
+(0x0801CB74..0x0801CB7E, 100 x USARTDIV), the mantissa r7 / 100 shifted into bits 15:4 (0x0801CB84..0x0801CB8C), then the
+fraction ((r7 mod 100) x 16 + 50) / 100 (0x0801CBB6..0x0801CBBE) and masks it with `ands r0, r0, #0xf` (0x0801CBC2) before
+the `orrs` into BRR (0x0801CBC6); with OVER8 the same with x 8 and `& 7` (0x0801CBA0..0x0801CBB0). When the fraction rounds
+up to 16 (8 with OVER8) the mask makes it 0 and the mantissa is not raised: BRR is one mantissa step too low. RM0038 27.6.3
+defines BRR as DIV_Mantissa[11:0] in bits 15:4 and DIV_Fraction[3:0] in bits 3:0 (USARTDIV = mantissa + fraction / 16), so
+the rounded value 16 / 16 belongs to the mantissa. For 19200 baud the case is PCLK1 = 4.2916 .. 4.3008 MHz: BRR 208 instead
+of 224, 20649 baud instead of 19174 (+7.5 %). v2.05 always passes the nominal MSI value 4.194304 MHz (fn_0801FE2A, BRR 218),
+so the case cannot happen there; the port's measured clock (IMP-46) can be in that window (MSI +2.3 .. +2.5 %, inside the
+data sheet's temperature drift). Port: the fraction is added to the mantissa field instead of masked and or-ed (a fraction of
+16 carries into bit 4; with OVER8 a fraction of 8 becomes mantissa + 1, BRR bit 3 stays 0). Emulator `test_msical.py` C5.
+
+### OF-73 — after auto power-off the restart hangs in a timer interrupt
+`FUN_0801C92E` (0x0801C92E, called by the STOP preparation `FUN_0801C522` at 0x0801C528) disables TIM2 and TIM3
+(TIM_Cmd) and then their clocks (RCC_APB1PeriphClockCmd), but leaves DIER.UIE set and does not clear SR.UIF.  An update
+flag that is set at that moment keeps the timer's interrupt request asserted through STOP.  After the EXTI wake the
+restart (`FUN_0801BE76`, called at 0x08024EEE) enables IRQ28 / IRQ29 in the NVIC (`FUN_0801BFDE`) while interrupts are
+not masked (v2.05 never masks them); the handler clears UIF by a write to TIMx_SR, which has no effect while the timer's
+clock is gated, so the level request stays and the handler is entered again at once, for ever.  The timers' clocks are
+switched on only later in the restart (0x0801BF0C, 0x0801BF10).  On a meter with the port (F-1.17, the same sequence),
+2026-11-07: a beep placed right after the STOP exit sounded on a key press, beeps after each restart step stopped
+inside the NVIC set-up, and only the dial off and on restarted the meter (a power-up: the dial OFF position removes the
+battery supply).  Not tested with v2.05 on a meter.  Port (F-1.18): `fn_0801C92E` clears DIER and SR of both timers
+while their clocks still run.  Emulator `test_apo_wake.py`.

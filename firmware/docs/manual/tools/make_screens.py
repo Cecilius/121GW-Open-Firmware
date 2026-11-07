@@ -11,7 +11,7 @@ Groups:
   setup    every SETUP page of DCV (the pages shared by all functions), normal and edit state; also with MIN/MAX on
            (statistics pages) and with Bluetooth on
   setupm1..4  the SETUP pages that differ from DCV's, for the other functions (Low Z, V and mV / Temp; Hz and Ohm / ...;
-           mVA / VA and uA / uVA; A / mA), normal and edit state
+           mVA / VA and uA / uVA; A / mA), normal and edit state (the walk of setupm2 draws the CAP page HUnt by itself: no code per page)
   special  lamp test, version, power-off, cal.bin messages, logging messages, SD errors
   limit    the limit test (Lt, Lo, HI pages and the PASS / HI / Lo verdicts) and the logging trigger pages (tr, Ch)
   boot     the bootloader's screens: lamp test, -IAP-, Ld nn, Ld oK, the card update
@@ -28,6 +28,7 @@ are written to firmware/docs/manual/img.
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -41,11 +42,19 @@ ASSETS = os.path.join(ROOT, 'emulator', 'ui', 'assets')
 IMAGE = os.path.join(FW, 'build', 'EEVBlog.bin')
 OUT = os.path.join(FW, 'docs', 'manual', 'img')
 BL_SRC = os.path.normpath(os.path.join(ROOT, '..', '121gw-work', 'bootloader-src'))
-GROUPS = ['dial', 'func', 'setup', 'setupm1', 'setupm2', 'setupm3', 'setupm4', 'special', 'limit', 'boot', 'bootfw']
+
+def fw_version():
+    """The firmware version text the image shows at power-on, from firmware/src/inc/config.inc (FW_VER_C0..C4)."""
+    txt = open(os.path.join(ROOT, 'firmware', 'src', 'inc', 'config.inc')).read()
+    c = [re.search(r"\.equ FW_VER_C%d, '(.)'" % k, txt).group(1) for k in range(5)]
+    return '%s%s%s.%s%s' % tuple(c)
+
+GROUPS = ['dial', 'func', 'setup', 'setupm1', 'setupm2', 'setupm3', 'setupm4', 'special', 'limit', 'boot', 'bootfw', 'feat']
 TITLES = {'dial': 'Dial positions and functions', 'func': 'Function states', 'setup': 'SETUP pages common to all functions (DCV)',
           'setupm1': 'SETUP pages of Low Z, V and mV / Temp that differ from DCV', 'setupm2': 'SETUP pages of Hz and Ohm / beep / diode / cap that differ from DCV',
           'setupm3': 'SETUP pages of mVA / VA and uA / uVA that differ from DCV', 'setupm4': 'SETUP pages of A / mA that differ from DCV',
-          'special': 'Special screens', 'limit': 'Limit test and logging trigger pages', 'boot': 'Bootloader screens', 'bootfw': 'Firmware pages that need the two-part bootloader'}
+          'special': 'Special screens', 'limit': 'Limit test and logging trigger pages', 'boot': 'Bootloader screens', 'bootfw': 'Firmware pages that need the two-part bootloader',
+          'feat': 'Features of the open firmware in use'}
 PW, PH = 695, 1338                                                    # panel drawing size (emulator/ui/index.html)
 LCD_BOX = (123, 188, 570, 444)
 DOTS = [-80.6, -62.4, -44.0, -25.9, -8.3, 9.4, 27.4, 44.5, 62.9, 81.1]  # pointer angles per dial position
@@ -298,7 +307,7 @@ def write_index(out, group, rec):
         lines += ['', 'Not made:', ''] + ['- %s: %s' % m for m in rec.missed]
     secs[TITLES[group]] = '\n'.join(lines)
     head = ('# Display pictures for the user manual\n\nMade by `tools/make_screens.py` from the emulator running the production '
-            'firmware (`firmware/build/EEVBlog.bin`, F-1.06) with the synthetic EEPROM; every picture shows the display words '
+            'firmware (`firmware/build/EEVBlog.bin`, ' + fw_version() + ') with the synthetic EEPROM; every picture shows the display words '
             'the firmware wrote, drawn with the emulator page\'s glass layers.  Pictures that show the whole front panel '
             '(695 x 1338 px) include the dial position and the plugged jacks; the others are cut off below the keys (695 x %d px).  '
             '"main" and "sub" are the decoded text of the main and sub display (the font draws S like 5, b like B, I like 1).  '
@@ -528,7 +537,7 @@ def walk(e, r, how, prefix, base, known, capture=True):
 def g_setup(r):
     e = meter()
     how = 'dial 2 (V), DCV; input %s' % apply_stim(e, 'DCV')
-    e.advance(10.0)                                                # the version F-1.06 stays on the sub display for a few seconds
+    e.advance(10.0)                                                # the version (fw_version()) stays on the sub display for a few seconds
     known = set()
     walk(e, r, how, '', set(), known)
     T.press(e, 'MINMAX')                                           # the MIN/MAX statistics and time pages
@@ -584,11 +593,11 @@ def g_special(r):
     # power-on: the version on the sub display, the lamp test of the power-on window (RANGE)
     e = meter(card=new_card())
     e.command({'reset': True})
-    if until(e, lambda e: text(e)[1].strip() == 'F-1.06', 3.0):
+    if until(e, lambda e: text(e)[1].strip() == fw_version(), 3.0):
         r.add(e, 'special_version', 'Power-on: the firmware version on the sub display (the main display is still blank)',
               'dial 2 (V); power cycle, display after %.2f s' % (snap(e)['time_ms'] / 1000.0))
     else:
-        r.miss('special_version', 'no F-1.06 on the sub display within 3 s of the power-up')
+        r.miss('special_version', 'no %s on the sub display within 3 s of the power-up' % fw_version())
     e.command({'reset': True})
     e.advance(0.5)
     e.command({'key': 'RANGE', 'down': True})
@@ -936,6 +945,103 @@ def g_bootfw(r):
             r.add(e, 'for_working', 'Page For while the card is being formatted: "Fr --"', 'as for_edit_yes, then SETUP held 1 s to confirm', words=w)
         elif sub.upper() == 'FR OK':
             r.add(e, 'for_ok', 'Page For: the card is now exFAT: "Fr oK"', 'as for_edit_yes, then SETUP held 1 s to confirm', words=w)
+
+
+def to_mode(e, name, tries=6):
+    """Press MODE until the function `name` is active."""
+    for _ in range(tries):
+        if mode_name(e) == name:
+            return True
+        T.press(e, 'MODE')
+        e.advance(1.5)
+    return mode_name(e) == name
+
+
+def g_feat(r):
+    """The open firmware's features in use.  Each setting is preset in the EEPROM byte the SETUP page itself stores
+    (firmware/EEPROM_MAP.md 4.1), so the meter starts with it as after a saved edit."""
+    def need(cond, what):
+        if not cond:
+            raise SystemExit('FAIL: ' + what)
+
+    # REL in percent (rEL-P: EEPROM 0x020 bit 0)
+    e = meter(patch={0x020: 1})
+    e.command({'dial': 2})
+    e.command({'input': dict(kind='V', value=1.0)})
+    e.advance(3.0)
+    T.press(e, 'REL')
+    e.advance(1.0)
+    e.command({'input': dict(kind='V', value=1.1)})
+    e.advance(3.0)
+    r.add(e, 'feat_relpct', 'REL in percent: reference 1.000 V, now 1.100 V', 'dial 2 DCV, rEL-P preset (0x020 = 1); 1.0 V, REL, then 1.1 V')
+    # dBm value and its reference (ACV page 11; 0x011 = 0: 600 ohm)
+    need(to_mode(e, 'ACV'), 'ACV not reached')
+    e.command({'input': dict(kind='V', value=1.0, ac=True, freq=1000)})
+    e.advance(3.0)
+    need(goto_item(e, 11), 'dBm page not reached')
+    e.advance(1.0)
+    r.add(e, 'feat_dbm', 'dBm of 1.000 V AC (600 ohm reference)', 'dial 2 ACV, 1.0 V AC 1 kHz, SETUP to the dBm page (11)')
+    T.long_press(e, 'SETUP')
+    r.blink(e, 'feat_dbm_ref', 'dBm reference page in edit: r 600', 'as feat_dbm, SETUP held: reference edit')
+    T.press(e, 'SETUP')                                               # short: leave without saving
+    e.advance(0.5)
+    # 4-20 mA loop percent (LP: 0x028 = 1), 12 mA = 50 %
+    e = meter(patch={0x028: 1})
+    plug(e, 'mA')
+    e.command({'dial': 8})
+    e.advance(2.0)
+    need(to_mode(e, 'DCmA'), 'DCmA not reached')
+    e.command({'input': dict(kind='A', value=12e-3)})
+    e.advance(3.0)
+    r.add(e, 'feat_loop', '4-20 mA loop view: 12 mA shown as 50 %', 'dial 8 DCmA, mA jack, L4-20 preset (0x028 = 1), 12 mA')
+    # PT100 (Pt: 0x029 = 1), 138.51 ohm = 100 degC (IEC 60751)
+    e = meter(patch={0x029: 1})
+    e.command({'dial': 5})
+    e.advance(2.0)
+    need(to_mode(e, 'OHM'), 'OHM not reached')
+    e.command({'input': dict(kind='ohm', value=138.51)})
+    e.advance(4.0)
+    r.add(e, 'feat_pt100', 'PT100 view: 138.51 ohm shown as a temperature', 'dial 5 OHM, Pt100 preset (0x029 = 1), 138.51 ohm')
+    # continuity UP300 (0x014 = 3) and beep hold 25 ms (0x021 = 2)
+    e = meter(patch={0x014: 3, 0x021: 2})
+    e.command({'dial': 5})
+    e.advance(2.0)
+    need(to_mode(e, 'BEEP'), 'BEEP not reached')
+    e.command({'input': dict(kind='ohm', value=1000)})
+    e.advance(2.0)
+    need(goto_item(e, 10), 'BEEP threshold page not reached')
+    r.add(e, 'feat_up300', 'Continuity threshold UP300 (beep above 300 ohm)', 'dial 5 BEEP, 0x014 = 3, SETUP to page 10')
+    need(goto_item(e, 26), 'bH page not reached')
+    r.add(e, 'feat_bh25', 'Continuity beep hold 25 ms', 'dial 5 BEEP, 0x021 = 2, SETUP to the bH page')
+    # thermocouple type J (0x00F = 1)
+    e = meter(patch={0x00F: 1})
+    e.command({'dial': 3})
+    e.advance(2.0)
+    need(to_mode(e, 'TEMP'), 'TEMP not reached')
+    e.command({'input': dict(kind='degC', value=100, board=23)})
+    e.advance(4.0)
+    need(goto_item(e, 23), 'tc page not reached')
+    r.add(e, 'feat_tcJ', 'Thermocouple type J selected', 'dial 3 TEMP, 0x00F = 1, SETUP to the tc page')
+    # capacitance anti-hunting (HUnt: EEPROM 0x020 bit 4 = 1): the page shows its name on the sub display, "on" on the main display
+    e = meter(patch={0x020: 0x10})
+    e.command({'dial': 5})
+    e.advance(2.0)
+    need(to_mode(e, 'CAP'), 'CAP not reached')
+    e.command({'input': dict(kind='F', value=100e-9)})
+    e.advance(6.0)
+    need(goto_item(e, 41), 'HUnt page not reached')
+    e.advance(1.0)
+    r.add(e, 'feat_hunt', 'Capacitance anti-hunting on: the page HUnt', 'dial 5 CAP, HUnt preset (0x020 = 0x10), 100 nF, SETUP to the page HUnt (item 41)')
+    # display level 2, Bluetooth 20/s, 12-hour clock, backlight 30 s (one meter)
+    e = meter(patch={0x013: 1, 0x015: 3, 0x020: 8, 0x017: 1})
+    e.command({'dial': 2})
+    e.command({'input': dict(kind='V', value=1.234)})
+    e.advance(3.0)
+    for item, name, what in ((24, 'feat_dsp2', 'Display level 2'), (21, 'feat_bt20', 'Bluetooth 20 readings per second'),
+                             (25, 'feat_cl12', '12-hour clock display'), (20, 'feat_bl30', 'Backlight off after 30 s'),
+                             (7, 'feat_time12', 'Time page in 12-hour form')):
+        need(goto_item(e, item), 'page %d not reached' % item)
+        r.add(e, name, what, 'dial 2 DCV; preset 0x013 = 1, 0x015 = 3, 0x020 = 8, 0x017 = 1; SETUP to page %d' % item)
 
 
 def run_group(group, out):
