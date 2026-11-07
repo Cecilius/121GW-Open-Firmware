@@ -3,7 +3,7 @@ the hardware-safety monitor (emu/safety.py).
 
 One entry per line, '#' starts a comment:
     <ref> <stream> <scenario-glob> <condition>
-  ref        the documented deviation: OF-<n> (firmware/ORIGINAL_FIRMWARE_ISSUES.md) or NF-, HW-, NVM-, IMP-, OPT-<n>
+  ref        the documented deviation: OF-<n> (firmware/ORIGINAL_FIRMWARE_ISSUES.md) or NF-, HW-, NVM-, IMP-, TMP-IMP-, OPT-<n>
              (firmware/DESIGN.md section 10); several joined by '+' (OF-14+OF-15) when one event is the
              consequence of all of them
   stream     a stream of the comparison (diff/compare.py: COMPARED and the final-state streams) or one of the
@@ -51,7 +51,7 @@ import fnmatch
 import re
 import shlex
 
-ONE_REF = r'(?:OF|NF|HW|NVM|IMP|OPT)-\d+'
+ONE_REF = r'(?:OF|NF|HW|NVM|TMP-IMP|IMP|OPT)-\d+'
 REF_RE = re.compile(ONE_REF + '(?:\\+' + ONE_REF + ')*')
 BUILDS = ('baseline', 'production')
 MASKS = ('lcd:sub', 'lcd:main', 'lcd:bar')
@@ -147,7 +147,7 @@ def load_allowlist(path, streams, build=None):
         if build is not None and build not in BUILDS:
             raise AllowlistError(f'{path}: unknown build {build!r}')
         if not REF_RE.fullmatch(ref):
-            raise AllowlistError(f'{path}:{n}: reference {ref!r} is not OF-, NF-, HW-, NVM-, IMP- or OPT-<number>')
+            raise AllowlistError(f'{path}:{n}: reference {ref!r} is not OF-, NF-, HW-, NVM-, IMP-, TMP-IMP- or OPT-<number>')
         if stream.startswith('tolerance:'):
             inner = stream.split(':', 1)[1]
             if streams is not None and inner not in streams:

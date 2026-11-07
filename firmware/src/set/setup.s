@@ -91,6 +91,7 @@
     .equ SET_ITEM_BFT, 39                   @ IMP-28: Bluetooth file transfer page Ld (between bt and rEL)
     .equ SET_ITEM_FMT, 40                   @ IMP-32: card format page Fr (between Ld and rEL, two-part bootloader only)
     .equ SET_ITEM_HUNT, 41                  @ IMP-45: capacitance anti-hunting page HUnt (CAP only, between dSP and CL)
+    .equ SET_ITEM_DCH, 42                   @ IMP-51: DIODE contact chirp page CH (DIODE only, between dSP and CL)
     .equ SET_ITEM_LT, 27                    @ IMP-20: limit test pages Lt (27), Lo (28), HI (29), verdict (36)
     .equ SET_ITEM_LO, 28
     .equ SET_ITEM_HI, 29
@@ -191,8 +192,9 @@ FUNC fn_08015410
 .Lsn_after_lt:
     ldr.w r0, =minmax_state
     ldrb r0, [r0, #0x0]
-    cbz r0, .Lsn_to0                        @ MIN/MAX off: next is item 0
-    movs r0, #SET_ITEM_ST_N                 @ MIN/MAX on: next is n
+    cbnz r0, 5f                             @ MIN/MAX off: next is item 0
+    b .Lsn_to0
+5:  movs r0, #SET_ITEM_ST_N                 @ MIN/MAX on: next is n
     b .Lsn_port_set
 .Lsn_not_lt:
     cmp r0, #SET_ITEM_BH
@@ -203,6 +205,8 @@ FUNC fn_08015410
     beq .Lsn_to_clk                         @ Pt: next is CL
     cmp r0, #SET_ITEM_HUNT
     beq .Lsn_to_clk                         @ HUnt: next is CL
+    cmp r0, #SET_ITEM_DCH
+    beq .Lsn_to_clk                         @ CH (DIODE chirp): next is CL
     cmp r0, #SET_ITEM_DSP
     bne .Lsn_not_dsp
     ldr.w r0, =meter_mode
@@ -219,8 +223,12 @@ FUNC fn_08015410
     bne 9f
     movs r0, #SET_ITEM_HUNT                 @ dSP in CAP: next is HUnt (IMP-45)
     b .Lsn_port_set
-9:  cmp r0, #0xa
-    bne .Lsn_to_clk                         @ dSP outside BEEP, DCmA, OHM and CAP: next is CL
+9:  cmp r0, #0xb
+    bne 10f
+    movs r0, #SET_ITEM_DCH                  @ dSP in DIODE: next is CH (IMP-51)
+    b .Lsn_port_set
+10: cmp r0, #0xa
+    bne .Lsn_to_clk                         @ dSP outside BEEP, DCmA, OHM, CAP and DIODE: next is CL
     movs r0, #SET_ITEM_BH                   @ dSP in BEEP: next is bH
     b .Lsn_port_set
 .Lsn_not_dsp:
@@ -1586,6 +1594,20 @@ FUNC fn_080165F4
     bl set_bh_edit                          @ up, down or save of the hold time
     b .L08016800
 .Lse_not_bh:
+    cmp r0, #SET_ITEM_DCH                   @ IMP-51: the DIODE chirp page CH (item 42)
+    bne .Lse_not_dch
+    uxtb r4, r4
+    cmp r4, #0x0                            @ query?
+    bne .Lse_dch_act
+    movs r0, #0x1
+    movs r5, r0                             @ query result: editable
+    b .L08016800
+.Lse_dch_act:
+    movs r0, r4
+    uxtb r0, r0
+    bl set_dch_edit                         @ up, down or save of the chirp setting
+    b .L08016800
+.Lse_not_dch:
     cmp r0, #SET_ITEM_LP                    @ IMP-24: the current-loop page LP (item 37)
     bne .Lse_not_lp
     uxtb r4, r4
@@ -2401,6 +2423,11 @@ FUNC fn_0801797C
     bl set_bh_draw                          @ draw "bH" and the hold time
     b .L08017F26
 .Lsd_not_bh:
+    cmp r0, #SET_ITEM_DCH                   @ IMP-51: the DIODE chirp page CH (item 42)
+    bne .Lsd_not_dch
+    bl set_dch_draw
+    b .L08017F26
+.Lsd_not_dch:
     cmp r0, #SET_ITEM_LP                    @ IMP-24: the current-loop page LP (item 37)
     bne .Lsd_not_lp
     bl set_lp_draw

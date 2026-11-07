@@ -37,10 +37,10 @@
 @            peak_hold, hold_stage2, mode_mode_req 0x2000804A, mode_range_req 0x2000804B and the measuring state
 @            that is cleared here (the blocks below list the addresses); calls load_full_scale, fn_0800D80C (HY3131
 @            row, calibration record, user zero), fn_0800FBE8 (front-end pins); production entering DIODE:
-@            mres_diode_chirp_reset (TMP-IMP-01)
+@            mres_diode_chirp_reset (IMP-51)
 @ Spec     : analysis/autorange_and_scheduler.md 2.3 (what happens after a decision); analysis/rotary.md 2
 @ Deviation: OF-36 (cal_capture_cancel at every apply, switch CAL_CANCEL_ON_MODE_CHANGE), OF-20 (the overload latch is
-@            cleared by ar_apply, called at the end of fn_0800DB48), TMP-IMP-01 (production: the DIODE contact chirp is
+@            cleared by ar_apply, called at the end of fn_0800DB48), IMP-51 (production: the DIODE contact chirp is
 @            re-armed on the mode change)
 @ -----------------------------------------------------------------------------
 FUNC meter_apply_mode_range
@@ -156,7 +156,7 @@ FUNC meter_apply_mode_range
     movs r0, #1                         @ 0800D3B6
     ldr r1, =range_manual               @ 0800D3B8
     strb r0, [r1]                       @ 0800D3BC
-    bl mres_diode_chirp_reset           @ TMP-IMP-01: entering DIODE arms the contact chirp again (MRES)
+    bl mres_diode_chirp_reset           @ IMP-51: entering DIODE arms the contact chirp again (MRES)
     b .Lap_0800D3C8                     @ 0800D3BE
 @ reached from 0800D3B4 bne (not equal / non-zero) after cmp r0, #0xB
 .Lap_0800D3C0:

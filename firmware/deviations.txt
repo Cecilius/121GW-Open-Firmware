@@ -699,12 +699,13 @@ OF-61  lcd_final  mem_logging_no_card  any
 IMP-27  lcd        setup_bat_not_editable  build == production and step in 8..10
 IMP-27  lcd_final  setup_bat_not_editable  build == production
 
-# TMP-IMP-01 (mres/diode.s, production only): the DIODE chirp is one double beep per confirmed contact instead of a report of
-# every >1000-count jump against the last chirped reference.  v2.05 chirps twice per contact and twice per disconnect
-# (the 1 s lockout 0x200080B4 lets the settled value chirp again) and once at the mode entry with open leads; the port
-# chirps once per contact and is silent at overload and on the way back to open.  In diode_values the buzzer therefore
-# sounds on the 0.6 V and 1.8 V contacts only (the 2.9 V and 5.0 V steps keep the LATCHED contact; 5.0 V is overload on
-# the 3 V range) instead of at every step, and in diode_range it stays silent (open leads, no contact).  Only the
-# buzzer pin differs; the display and the value chain are unchanged.
-TMP-IMP-01  gpio  diode_values  build == production and pin == buzzer
-TMP-IMP-01  gpio  diode_range   build == production and pin == buzzer
+# IMP-51 (mres/diode.s, set/dch.s, production only): configurable DIODE chirp (SETUP page CH in DIODE, EEPROM 0x02C,
+# off by default).  Off (default): the original v2.05 jump chirp (v_20007CD4 ref, v_200080B4 lockout) - the port should
+# match v2.05 on these scenarios.  On (contact chirp): one double beep per confirmed contact instead of a jump report;
+# v2.05 chirps twice per contact and twice per disconnect and once at the mode entry with open leads, while the port
+# chirps once per contact and is silent at overload and on the way back to open.  With contact chirp on, in diode_values the
+# buzzer sounds on the 0.6 V and 1.8 V contacts only (2.9 V and 5.0 V keep the LATCHED contact; 5.0 V is overload on the
+# 3 V range) instead of at every step, and in diode_range it stays silent (open leads, no contact); only the buzzer pin
+# differs and the display/value chain are unchanged.  The scenarios run at default settings (contact chirp off).
+IMP-51  gpio  diode_values  build == production and pin == buzzer
+IMP-51  gpio  diode_range   build == production and pin == buzzer
