@@ -194,7 +194,7 @@ FUNC fn_08007E84
     movs r0, #1                        @ 0x08007F64
     ldr r1, =v_2000805D                @ 0x08007F66 pool 0x08007F9C = 0x2000805D
     strb r0, [r1, #0]                  @ 0x08007F68
-.L08007F6A:                              @ reached from 0x08007E8C bne
+.L08007F6A:                              @ reached from 0x08007E8C beq
     @ ---- per-sample value: 0x20007D68 = divide_by_gain(sample - offset), divided by 10 in 15 V ----
     bl fn_080064D6                     @ 0x08007F6A
     ldr r0, =v_200080B3                @ 0x08007F6E pool 0x080087CC = 0x200080B3
@@ -207,7 +207,7 @@ FUNC fn_08007E84
     sdiv r0, r0, r1                    @ 0x08007F80
     ldr r1, =v_20007D68                @ 0x08007F84 pool 0x08008340 = 0x20007D68
     str r0, [r1, #0]                   @ 0x08007F88
-.L08007F8A:                              @ reached from 0x08007F76 bne
+.L08007F8A:                              @ reached from 0x08007F76 beq
     @ ---- IMP-04: tone decision on confirmed per-sample values.  v = 0x20007D68 (15 V: already divided by 10 above) ----
     ldr r0, =v_20007D68
     ldr r0, [r0]

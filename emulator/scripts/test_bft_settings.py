@@ -7,9 +7,9 @@ Two emulated meters, both with the bundled synthetic EEPROM.  The reference mete
 with the keys (item poked, long SETUP = edit, REL until the page's RAM variable has the wanted value, long SETUP = save);
 for every setting the EEPROM byte and the RAM variable it ends with are recorded.  The second meter shows the page Ld
 (Bluetooth on) and takes PUT requests over the emulated USART2 (host side emulator/tools/btft.py).
-  T1 reference: the pages (the four pages of EEPROM 0x020 together; the page APO for 0x016 and for the time 0x02B)
+  T1 reference: the 18 pages (the four pages of EEPROM 0x020 together; the page APO for 0x016 and for the time 0x02B)
      give the recorded EEPROM byte and RAM value.
-  T2 GET: the ids in table order with the values of the synthetic EEPROM as the pages show them.
+  T2 GET: the 19 ids in table order with the values of the synthetic EEPROM as the pages show them.
   T3 round trip: every id with 2 .. 4 values (the first is the one the reference meter's page gave): status 0, the answer
      names the id and the value now in effect, the EEPROM byte and the RAM variable equal the reference's for the first
      value and the page's rules for the others (byte = value, RAM = value - bias), and no other EEPROM byte changed (the
